@@ -11,9 +11,9 @@ name = "netpulse"
 path = "src/main.rs"
 
 [dependencies]
-tray-icon = "0.26"
+tray-icon = "0.22"
 winit = "0.30"
-winreg = "0.56"
+winreg = "0.55"
 
 [dependencies.windows]
 version = "0.62"
