@@ -11,12 +11,12 @@ name = "netpulse"
 path = "src/main.rs"
 
 [dependencies]
-tray-icon = "0.22"
+tray-icon = "0.19"
 winit = "0.30"
 winreg = "0.55"
 
 [dependencies.windows]
-version = "0.62"
+version = "0.58"
 features = [
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
@@ -24,7 +24,6 @@ features = [
     "Win32_NetworkManagement_IpHelper",
     "Win32_NetworkManagement_Ndis",
     "Win32_System_LibraryLoader",
-    "Win32_UI_Controls",
     "Win32_UI_WindowsAndMessaging",
 ]
 
