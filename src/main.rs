@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
 use windows::Win32::Graphics::Gdi::{
     CreateCompatibleDC, CreateDIBSection, CreateFontW, CreateSolidBrush, DeleteDC, DeleteObject,
@@ -22,11 +22,11 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongPtrW, LoadCursorW,
     RegisterClassExW, SendMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowTextW,
-    ShowWindow, BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX, BS_PUSHBUTTON, BST_CHECKED,
-    BST_UNCHECKED, CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, CBS_DROPDOWNLIST, CW_USEDEFAULT,
-    GWLP_USERDATA, HMENU, IDC_ARROW, SS_LEFT, SW_HIDE, SW_SHOW, WINDOW_STYLE, WM_CLOSE,
-    WM_COMMAND, WM_DESTROY, WM_SETFONT, WM_SETTINGCHANGE, WNDCLASSEXW, WS_CAPTION, WS_CHILD,
-    WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    ShowWindow, BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX, BS_PUSHBUTTON, CB_ADDSTRING,
+    CB_GETCURSEL, CB_SETCURSEL, CBS_DROPDOWNLIST, CW_USEDEFAULT, GWLP_USERDATA, HMENU, IDC_ARROW,
+    SW_HIDE, SW_SHOW, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_SETFONT,
+    WM_SETTINGCHANGE, WNDCLASSEXW, WS_CAPTION, WS_CHILD, WS_MINIMIZEBOX, WS_OVERLAPPED,
+    WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
@@ -39,6 +39,11 @@ const APP_NAME: &str = "NetPulse";
 const RUN_REG_PATH: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const PERSONALIZE_REG_PATH: &str =
     r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize";
+
+// Standard Win32 constants
+const BST_CHECKED_VAL: usize = 1;
+const BST_UNCHECKED_VAL: usize = 0;
+const SS_LEFT_STYLE: u32 = 0;
 
 // Control IDs for native Win32 Settings Window
 const ID_CHK_ENABLED: usize = 1001;
@@ -345,9 +350,9 @@ impl NetPulseApp {
                 self.settings_win.chk_enabled,
                 BM_SETCHECK,
                 WPARAM(if cfg.monitor_enabled {
-                    BST_CHECKED.0 as usize
+                    BST_CHECKED_VAL
                 } else {
-                    BST_UNCHECKED.0 as usize
+                    BST_UNCHECKED_VAL
                 }),
                 LPARAM(0),
             );
@@ -355,9 +360,9 @@ impl NetPulseApp {
                 self.settings_win.chk_autostart,
                 BM_SETCHECK,
                 WPARAM(if cfg.auto_start {
-                    BST_CHECKED.0 as usize
+                    BST_CHECKED_VAL
                 } else {
-                    BST_UNCHECKED.0 as usize
+                    BST_UNCHECKED_VAL
                 }),
                 LPARAM(0),
             );
@@ -433,7 +438,7 @@ impl ApplicationHandler<UserEvent> for NetPulseApp {
                 } else if id == self.id_exit {
                     self.tray_icon.take();
                     unsafe {
-                        let _ = DeleteObject(self.settings_win.ui_font.into());
+                        let _ = DeleteObject(self.settings_win.ui_font);
                         let _ = DestroyWindow(self.settings_win.hwnd);
                     }
                     event_loop.exit();
@@ -654,9 +659,8 @@ fn render_tray_icon(
         };
 
         let mut bits_ptr: *mut c_void = std::ptr::null_mut();
-        if let Ok(hbmp) = CreateDIBSection(Some(hdc), &bmi, DIB_RGB_COLORS, &mut bits_ptr, None, 0)
-        {
-            let old_bmp = SelectObject(hdc, hbmp.into());
+        if let Ok(hbmp) = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &mut bits_ptr, None, 0) {
+            let old_bmp = SelectObject(hdc, hbmp);
 
             // Clear to pure black (0x00000000)
             let bg_brush = CreateSolidBrush(COLORREF(0));
@@ -667,7 +671,7 @@ fn render_tray_icon(
                 bottom: SIZE,
             };
             FillRect(hdc, &full_rect, bg_brush);
-            let _ = DeleteObject(bg_brush.into());
+            let _ = DeleteObject(bg_brush);
 
             let font = CreateFontW(
                 font_px,
@@ -678,14 +682,14 @@ fn render_tray_icon(
                 0,
                 0,
                 0,
-                DEFAULT_CHARSET,
-                OUT_TT_PRECIS,
-                CLIP_DEFAULT_PRECIS,
-                ANTIALIASED_QUALITY,
+                DEFAULT_CHARSET.0 as u32,
+                OUT_TT_PRECIS.0 as u32,
+                CLIP_DEFAULT_PRECIS.0 as u32,
+                ANTIALIASED_QUALITY.0 as u32,
                 (DEFAULT_PITCH.0 | FF_SWISS.0) as u32,
                 w!("Segoe UI"),
             );
-            let old_font = SelectObject(hdc, font.into());
+            let old_font = SelectObject(hdc, font);
 
             // Draw white text on black background to extract antialiased alpha coverage
             SetBkMode(hdc, TRANSPARENT);
@@ -756,9 +760,9 @@ fn render_tray_icon(
             }
 
             SelectObject(hdc, old_font);
-            let _ = DeleteObject(font.into());
+            let _ = DeleteObject(font);
             SelectObject(hdc, old_bmp);
-            let _ = DeleteObject(hbmp.into());
+            let _ = DeleteObject(hbmp);
         }
         let _ = DeleteDC(hdc);
     }
@@ -800,13 +804,14 @@ fn create_settings_window(
     proxy: EventLoopProxy<UserEvent>,
 ) -> SettingsWindow {
     unsafe {
-        let hinstance = GetModuleHandleW(None).unwrap_or_default();
+        let hmodule = GetModuleHandleW(None).unwrap_or_default();
+        let hinstance = HINSTANCE(hmodule.0);
         let class_name = w!("NetPulseSettingsClass");
 
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
             lpfnWndProc: Some(settings_wnd_proc),
-            hInstance: hinstance.into(),
+            hInstance: hinstance,
             hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
             hbrBackground: HBRUSH((COLOR_WINDOW.0 + 1) as *mut c_void),
             lpszClassName: class_name,
@@ -825,7 +830,7 @@ fn create_settings_window(
             390,
             None,
             None,
-            Some(hinstance.into()),
+            hinstance,
             None,
         )
         .expect("Failed to create settings window");
@@ -848,10 +853,10 @@ fn create_settings_window(
             0,
             0,
             0,
-            DEFAULT_CHARSET,
-            OUT_TT_PRECIS,
-            CLIP_DEFAULT_PRECIS,
-            ANTIALIASED_QUALITY,
+            DEFAULT_CHARSET.0 as u32,
+            OUT_TT_PRECIS.0 as u32,
+            CLIP_DEFAULT_PRECIS.0 as u32,
+            ANTIALIASED_QUALITY.0 as u32,
             (DEFAULT_PITCH.0 | FF_SWISS.0) as u32,
             w!("Segoe UI"),
         );
@@ -874,9 +879,9 @@ fn create_settings_window(
                 y,
                 w,
                 h,
-                Some(hwnd),
-                Some(HMENU(id as *mut c_void)),
-                Some(hinstance.into()),
+                hwnd,
+                HMENU(id as *mut c_void),
+                hinstance,
                 None,
             )
             .unwrap();
@@ -892,7 +897,7 @@ fn create_settings_window(
         let lbl_down = make_ctrl(
             w!("STATIC"),
             w!("Download:  ↓ 0 B/s"),
-            SS_LEFT.0,
+            SS_LEFT_STYLE,
             20,
             18,
             345,
@@ -902,7 +907,7 @@ fn create_settings_window(
         let lbl_up = make_ctrl(
             w!("STATIC"),
             w!("Upload:    ↑ 0 B/s"),
-            SS_LEFT.0,
+            SS_LEFT_STYLE,
             20,
             44,
             345,
@@ -912,7 +917,7 @@ fn create_settings_window(
         let lbl_session = make_ctrl(
             w!("STATIC"),
             w!("Session:   ↓ 0 B   |   ↑ 0 B"),
-            SS_LEFT.0,
+            SS_LEFT_STYLE,
             20,
             72,
             345,
@@ -922,7 +927,7 @@ fn create_settings_window(
         let lbl_adapter = make_ctrl(
             w!("STATIC"),
             w!("Adapter:   Detecting..."),
-            SS_LEFT.0,
+            SS_LEFT_STYLE,
             20,
             98,
             345,
@@ -944,7 +949,7 @@ fn create_settings_window(
         let _ = make_ctrl(
             w!("STATIC"),
             w!("Taskbar Layout:"),
-            SS_LEFT.0,
+            SS_LEFT_STYLE,
             20,
             174,
             120,
@@ -973,7 +978,7 @@ fn create_settings_window(
         let _ = make_ctrl(
             w!("STATIC"),
             w!("Font Size:"),
-            SS_LEFT.0,
+            SS_LEFT_STYLE,
             20,
             208,
             120,
@@ -1002,7 +1007,7 @@ fn create_settings_window(
         let _ = make_ctrl(
             w!("STATIC"),
             w!("Text Color:"),
-            SS_LEFT.0,
+            SS_LEFT_STYLE,
             20,
             242,
             120,
@@ -1113,7 +1118,7 @@ unsafe extern "system" fn settings_wnd_proc(
                 let data = &*ptr;
                 let _ = data.proxy.send_event(UserEvent::SettingsChanged);
             }
-            let _ = InvalidateRect(Some(hwnd), None, true);
+            let _ = InvalidateRect(hwnd, None, true);
             LRESULT(0)
         }
         WM_COMMAND => {
@@ -1127,16 +1132,16 @@ unsafe extern "system" fn settings_wnd_proc(
                     ID_CHK_ENABLED => {
                         let checked =
                             SendMessageW(data.chk_enabled, BM_GETCHECK, WPARAM(0), LPARAM(0)).0
-                                as u32
-                                == BST_CHECKED.0;
+                                as usize
+                                == BST_CHECKED_VAL;
                         data.shared.lock().unwrap().config.monitor_enabled = checked;
                         let _ = data.proxy.send_event(UserEvent::SettingsChanged);
                     }
                     ID_CHK_AUTOSTART => {
                         let checked =
                             SendMessageW(data.chk_autostart, BM_GETCHECK, WPARAM(0), LPARAM(0)).0
-                                as u32
-                                == BST_CHECKED.0;
+                                as usize
+                                == BST_CHECKED_VAL;
                         if set_autostart(checked).is_ok() {
                             data.shared.lock().unwrap().config.auto_start = checked;
                         }
