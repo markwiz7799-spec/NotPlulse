@@ -1,6 +1,8 @@
 #![windows_subsystem = "windows"]
 
 use std::ffi::c_void;
+use std::fs;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -22,16 +24,23 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::NetworkManagement::IpHelper::{FreeMibTable, GetIfTable2, MIB_IF_TABLE2};
 use windows::Win32::NetworkManagement::Ndis::IfOperStatusUp;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Controls::Dialogs::{
+    ChooseColorW, CC_FULLOPEN, CC_RGBINIT, CHOOSECOLORW,
+};
+use windows::Win32::UI::Shell::{
+    Shell_NotifyIconW, NIF_INFO, NIIF_WARNING, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, FindWindowExW, FindWindowW, GetWindowLongPtrW,
-    GetWindowRect, LoadCursorW, RegisterClassExW, SendMessageW, SetForegroundWindow,
-    SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, UpdateLayeredWindow, BM_GETCHECK,
-    BM_SETCHECK, BS_AUTOCHECKBOX, BS_PUSHBUTTON, CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL,
-    CBS_DROPDOWNLIST, CW_USEDEFAULT, GWLP_USERDATA, HMENU, HWND_TOPMOST, IDC_ARROW, SWP_NOACTIVATE,
+    GetWindowRect, GetWindowTextW, LoadCursorW, RegisterClassExW, SendMessageW,
+    SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow,
+    UpdateLayeredWindow, BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX, BS_PUSHBUTTON, CB_ADDSTRING,
+    CB_GETCURSEL, CB_SETCURSEL, CBS_DROPDOWNLIST, CW_USEDEFAULT, GWLP_USERDATA, HMENU, HWND_TOPMOST,
+    IDC_ARROW, LB_ADDSTRING, LB_GETCURSEL, LB_RESETCONTENT, LB_SETCURSEL, SWP_NOACTIVATE,
     SWP_SHOWWINDOW, SW_HIDE, SW_SHOW, ULW_ALPHA, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_DESTROY,
-    WM_SETFONT, WM_SETTINGCHANGE, WNDCLASSEXW, WS_CAPTION, WS_CHILD, WS_EX_LAYERED,
+    WM_SETFONT, WM_SETTINGCHANGE, WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_EX_LAYERED,
     WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_MINIMIZEBOX,
-    WS_OVERLAPPED, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    WS_OVERLAPPED, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
@@ -49,9 +58,13 @@ const PERSONALIZE_REG_PATH: &str =
 const BST_CHECKED_VAL: usize = 1;
 const BST_UNCHECKED_VAL: usize = 0;
 const SS_LEFT_STYLE: u32 = 0;
+const ES_AUTOHSCROLL_STYLE: u32 = 0x0080;
+const LBS_NOTIFY_STYLE: u32 = 0x0001;
+const CBN_SELCHANGE_NOTIF: usize = 1;
+const LBN_SELCHANGE_NOTIF: usize = 1;
 
 // Overlay widget dimensions (positioned next to Windows 11 clock)
-const OVERLAY_W: i32 = 136;
+const OVERLAY_W: i32 = 165;
 const OVERLAY_H: i32 = 44;
 
 // Control IDs for native Win32 Settings Window
@@ -63,6 +76,26 @@ const ID_CMB_COLOR: usize = 1005;
 const ID_BTN_RESET: usize = 1006;
 const ID_BTN_HIDE: usize = 1007;
 const ID_CHK_OVERLAY: usize = 1008;
+
+// Dynamic Speed Color Rule Control IDs
+const ID_CHK_DYN_ENABLED: usize = 1010;
+const ID_CMB_DYN_METRIC: usize = 1011;
+const ID_LST_RULES: usize = 1012;
+const ID_EDT_MIN: usize = 1013;
+const ID_CMB_MIN_UNIT: usize = 1014;
+const ID_EDT_MAX: usize = 1015;
+const ID_CMB_MAX_UNIT: usize = 1016;
+const ID_CMB_RULE_COLOR: usize = 1017;
+const ID_EDT_RULE_HEX: usize = 1018;
+const ID_BTN_PICK_COLOR: usize = 1019;
+const ID_BTN_ADD_RULE: usize = 1020;
+const ID_BTN_UPD_RULE: usize = 1021;
+const ID_BTN_DEL_RULE: usize = 1022;
+
+// Data Usage Limit Control IDs
+const ID_CHK_LIMIT_ENABLED: usize = 1030;
+const ID_EDT_LIMIT_VAL: usize = 1031;
+const ID_CMB_LIMIT_UNIT: usize = 1032;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TrayLayout {
@@ -88,6 +121,88 @@ enum ColorMode {
     Amber = 5,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SpeedMetric {
+    Download = 0,
+    Total = 1,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SpeedUnit {
+    Unlimited = 0,
+    KBps = 1,
+    MBps = 2,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DataUnit {
+    MB = 0,
+    GB = 1,
+}
+
+#[derive(Clone)]
+struct ColorRule {
+    min_val: f64,
+    min_unit: SpeedUnit, // KBps or MBps
+    max_val: f64,
+    max_unit: SpeedUnit, // Unlimited, KBps, or MBps
+    is_auto: bool,
+    rgb: (u8, u8, u8),
+    color_label: String,
+}
+
+impl ColorRule {
+    fn min_bps(&self) -> u64 {
+        let mul = match self.min_unit {
+            SpeedUnit::KBps => 1024.0,
+            SpeedUnit::MBps => 1024.0 * 1024.0,
+            SpeedUnit::Unlimited => 0.0,
+        };
+        (self.min_val.max(0.0) * mul) as u64
+    }
+
+    fn max_bps(&self) -> Option<u64> {
+        match self.max_unit {
+            SpeedUnit::Unlimited => None,
+            SpeedUnit::KBps => Some((self.max_val.max(0.0) * 1024.0) as u64),
+            SpeedUnit::MBps => Some((self.max_val.max(0.0) * 1024.0 * 1024.0) as u64),
+        }
+    }
+
+    fn matches(&self, bps: u64) -> bool {
+        if bps < self.min_bps() {
+            return false;
+        }
+        match self.max_bps() {
+            Some(max) => bps < max,
+            None => true,
+        }
+    }
+
+    fn display_text(&self) -> String {
+        let min_u = if self.min_unit == SpeedUnit::MBps {
+            "MB/s"
+        } else {
+            "KB/s"
+        };
+        let max_str = match self.max_unit {
+            SpeedUnit::Unlimited => "Unlimited".to_string(),
+            SpeedUnit::KBps => format!("{} KB/s", trim_num(self.max_val)),
+            SpeedUnit::MBps => format!("{} MB/s", trim_num(self.max_val)),
+        };
+        format!(
+            "{} {} - {}  ->  {} (#{:02X}{:02X}{:02X})",
+            trim_num(self.min_val),
+            min_u,
+            max_str,
+            self.color_label,
+            self.rgb.0,
+            self.rgb.1,
+            self.rgb.2
+        )
+    }
+}
+
 #[derive(Clone)]
 struct AppConfig {
     monitor_enabled: bool,
@@ -96,6 +211,12 @@ struct AppConfig {
     color_mode: ColorMode,
     auto_start: bool,
     show_overlay: bool,
+    dynamic_enabled: bool,
+    dynamic_metric: SpeedMetric,
+    rules: Vec<ColorRule>,
+    limit_enabled: bool,
+    limit_value: f64,
+    limit_unit: DataUnit,
 }
 
 impl Default for AppConfig {
@@ -107,8 +228,65 @@ impl Default for AppConfig {
             color_mode: ColorMode::Auto,
             auto_start: is_autostart_enabled(),
             show_overlay: false,
+            dynamic_enabled: true,
+            dynamic_metric: SpeedMetric::Download,
+            rules: default_rules(),
+            limit_enabled: false,
+            limit_value: 1.0,
+            limit_unit: DataUnit::GB,
         }
     }
+}
+
+impl AppConfig {
+    fn limit_bytes(&self) -> u64 {
+        let mul = match self.limit_unit {
+            DataUnit::MB => 1024.0 * 1024.0,
+            DataUnit::GB => 1024.0 * 1024.0 * 1024.0,
+        };
+        (self.limit_value.max(0.1) * mul) as u64
+    }
+}
+
+fn default_rules() -> Vec<ColorRule> {
+    vec![
+        ColorRule {
+            min_val: 0.0,
+            min_unit: SpeedUnit::KBps,
+            max_val: 500.0,
+            max_unit: SpeedUnit::KBps,
+            is_auto: true,
+            rgb: (255, 255, 255),
+            color_label: "Auto".to_string(),
+        },
+        ColorRule {
+            min_val: 500.0,
+            min_unit: SpeedUnit::KBps,
+            max_val: 2.0,
+            max_unit: SpeedUnit::MBps,
+            is_auto: false,
+            rgb: (74, 222, 128),
+            color_label: "Green".to_string(),
+        },
+        ColorRule {
+            min_val: 2.0,
+            min_unit: SpeedUnit::MBps,
+            max_val: 10.0,
+            max_unit: SpeedUnit::MBps,
+            is_auto: false,
+            rgb: (251, 191, 36),
+            color_label: "Amber".to_string(),
+        },
+        ColorRule {
+            min_val: 10.0,
+            min_unit: SpeedUnit::MBps,
+            max_val: 0.0,
+            max_unit: SpeedUnit::Unlimited,
+            is_auto: false,
+            rgb: (239, 68, 68),
+            color_label: "Red".to_string(),
+        },
+    ]
 }
 
 #[derive(Clone, Default)]
@@ -118,6 +296,8 @@ struct NetStats {
     session_down_bytes: u64,
     session_up_bytes: u64,
     active_adapter: String,
+    alert_triggered: bool,
+    tick_phase: bool,
 }
 
 struct SharedState {
@@ -145,6 +325,12 @@ struct SettingsWindow {
     cmb_layout: HWND,
     cmb_fontsize: HWND,
     cmb_color: HWND,
+    chk_dyn_enabled: HWND,
+    cmb_dyn_metric: HWND,
+    lst_rules: HWND,
+    chk_limit_enabled: HWND,
+    edt_limit_val: HWND,
+    cmb_limit_unit: HWND,
     ui_font: HFONT,
 }
 
@@ -157,6 +343,19 @@ struct WindowUserData {
     cmb_layout: HWND,
     cmb_fontsize: HWND,
     cmb_color: HWND,
+    chk_dyn_enabled: HWND,
+    cmb_dyn_metric: HWND,
+    lst_rules: HWND,
+    edt_min: HWND,
+    cmb_min_unit: HWND,
+    edt_max: HWND,
+    cmb_max_unit: HWND,
+    cmb_rule_color: HWND,
+    edt_rule_hex: HWND,
+    chk_limit_enabled: HWND,
+    edt_limit_val: HWND,
+    cmb_limit_unit: HWND,
+    overlay_hwnd: HWND,
 }
 
 fn main() {
@@ -165,7 +364,6 @@ fn main() {
         .expect("Failed to create winit event loop");
     let proxy = event_loop.create_proxy();
 
-    // Forward tray & menu events into winit event loop
     let tray_proxy = proxy.clone();
     TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
         if let TrayIconEvent::Click {
@@ -183,25 +381,23 @@ fn main() {
         let _ = menu_proxy.send_event(UserEvent::Menu(event.id));
     }));
 
+    let loaded_config = load_config();
+    let init_autostart = loaded_config.auto_start;
+    let init_overlay = loaded_config.show_overlay;
+
     let shared = Arc::new(Mutex::new(SharedState {
-        config: AppConfig::default(),
+        config: loaded_config,
         stats: NetStats {
             active_adapter: "Detecting...".to_string(),
             ..Default::default()
         },
     }));
 
-    // Build Tray Menu
     let menu = Menu::new();
     let item_open = MenuItem::new("Open Settings", true, None);
     let item_toggle = CheckMenuItem::new("Enable Taskbar Monitor", true, true, None);
-    let item_overlay = CheckMenuItem::new("Show Large Taskbar Overlay", true, false, None);
-    let item_autostart = CheckMenuItem::new(
-        "Start with Windows",
-        true,
-        shared.lock().unwrap().config.auto_start,
-        None,
-    );
+    let item_overlay = CheckMenuItem::new("Show Large Taskbar Overlay", true, init_overlay, None);
+    let item_autostart = CheckMenuItem::new("Start with Windows", true, init_autostart, None);
     let item_exit = MenuItem::new("Exit", true, None);
 
     menu.append(&item_open).unwrap();
@@ -229,7 +425,6 @@ fn main() {
         .build()
         .expect("Failed to create tray icon");
 
-    // Spawn 1-second network sampling thread
     let worker_shared = Arc::clone(&shared);
     let worker_proxy = proxy.clone();
     std::thread::spawn(move || {
@@ -266,6 +461,7 @@ fn main() {
                 state.stats.session_up_bytes =
                     state.stats.session_up_bytes.saturating_add(delta_up);
                 state.stats.active_adapter = curr.adapter_name.clone();
+                state.stats.tick_phase = !state.stats.tick_phase;
             }
 
             prev_sample = curr;
@@ -275,8 +471,8 @@ fn main() {
         }
     });
 
-    let settings_win = create_settings_window(Arc::clone(&shared), proxy.clone());
     let overlay_hwnd = create_overlay_window();
+    let settings_win = create_settings_window(Arc::clone(&shared), proxy.clone(), overlay_hwnd);
 
     let mut app = NetPulseApp {
         shared,
@@ -313,13 +509,47 @@ struct NetPulseApp {
 }
 
 impl NetPulseApp {
-    fn refresh_tray_and_ui(&self) {
-        let (cfg, stats) = {
-            let state = self.shared.lock().unwrap();
-            (state.config.clone(), state.stats.clone())
+    fn refresh_tray_and_ui(&self, sync_controls: bool) {
+        let (cfg, stats, fire_alert) = {
+            let mut state = self.shared.lock().unwrap();
+            let total_session = state
+                .stats
+                .session_down_bytes
+                .saturating_add(state.stats.session_up_bytes);
+            let limit_exceeded =
+                state.config.limit_enabled && total_session >= state.config.limit_bytes();
+
+            let mut fire = false;
+            if limit_exceeded && !state.stats.alert_triggered {
+                state.stats.alert_triggered = true;
+                fire = true;
+            }
+            (state.config.clone(), state.stats.clone(), fire)
         };
 
-        let color = resolve_text_color(cfg.color_mode);
+        let total_session = stats
+            .session_down_bytes
+            .saturating_add(stats.session_up_bytes);
+        let limit_exceeded = cfg.limit_enabled && total_session >= cfg.limit_bytes();
+
+        if fire_alert {
+            show_limit_balloon(
+                self.overlay_hwnd,
+                total_session,
+                cfg.limit_bytes(),
+            );
+        }
+
+        let color = if limit_exceeded {
+            if stats.tick_phase {
+                (239, 68, 68) // Alert Red
+            } else {
+                (255, 140, 140) // Flashing Alert
+            }
+        } else {
+            resolve_effective_color(&cfg, stats.down_bps, stats.up_bps)
+        };
+
         let icon = render_tray_icon(
             stats.down_bps,
             stats.up_bps,
@@ -332,8 +562,9 @@ impl NetPulseApp {
         if let Some(tray) = &self.tray_icon {
             let _ = tray.set_icon(Some(icon));
             let tip = if cfg.monitor_enabled {
+                let alert_tag = if limit_exceeded { " [LIMIT EXCEEDED!]" } else { "" };
                 format!(
-                    "NetPulse\n↓ {}/s   ↑ {}/s\nSession: ↓ {} / ↑ {}\n{}",
+                    "NetPulse{alert_tag}\n↓ {}/s   ↑ {}/s\nSession: ↓ {} / ↑ {}\n{}",
                     format_speed_long(stats.down_bps),
                     format_speed_long(stats.up_bps),
                     format_bytes(stats.session_down_bytes),
@@ -346,7 +577,6 @@ impl NetPulseApp {
             let _ = tray.set_tooltip(Some(tip));
         }
 
-        // Update or hide the floating Taskbar Overlay Widget
         update_overlay_window(
             self.overlay_hwnd,
             cfg.show_overlay,
@@ -354,6 +584,7 @@ impl NetPulseApp {
             stats.down_bps,
             stats.up_bps,
             color,
+            limit_exceeded,
         );
 
         self.item_toggle.set_checked(cfg.monitor_enabled);
@@ -370,9 +601,10 @@ impl NetPulseApp {
                 format_speed_long(stats.up_bps)
             ));
             let sess_text = to_wide(&format!(
-                "Session:   ↓ {}   |   ↑ {}",
+                "Session:   ↓ {}   |   ↑ {}{}",
                 format_bytes(stats.session_down_bytes),
-                format_bytes(stats.session_up_bytes)
+                format_bytes(stats.session_up_bytes),
+                if limit_exceeded { "  [LIMIT!]" } else { "" }
             ));
             let adp_text = to_wide(&format!("Adapter:   {}", stats.active_adapter));
 
@@ -381,54 +613,91 @@ impl NetPulseApp {
             let _ = SetWindowTextW(self.settings_win.lbl_session, PCWSTR(sess_text.as_ptr()));
             let _ = SetWindowTextW(self.settings_win.lbl_adapter, PCWSTR(adp_text.as_ptr()));
 
-            SendMessageW(
-                self.settings_win.chk_enabled,
-                BM_SETCHECK,
-                WPARAM(if cfg.monitor_enabled {
-                    BST_CHECKED_VAL
-                } else {
-                    BST_UNCHECKED_VAL
-                }),
-                LPARAM(0),
-            );
-            SendMessageW(
-                self.settings_win.chk_overlay,
-                BM_SETCHECK,
-                WPARAM(if cfg.show_overlay {
-                    BST_CHECKED_VAL
-                } else {
-                    BST_UNCHECKED_VAL
-                }),
-                LPARAM(0),
-            );
-            SendMessageW(
-                self.settings_win.chk_autostart,
-                BM_SETCHECK,
-                WPARAM(if cfg.auto_start {
-                    BST_CHECKED_VAL
-                } else {
-                    BST_UNCHECKED_VAL
-                }),
-                LPARAM(0),
-            );
-            SendMessageW(
-                self.settings_win.cmb_layout,
-                CB_SETCURSEL,
-                WPARAM(cfg.layout as usize),
-                LPARAM(0),
-            );
-            SendMessageW(
-                self.settings_win.cmb_fontsize,
-                CB_SETCURSEL,
-                WPARAM(cfg.font_size as usize),
-                LPARAM(0),
-            );
-            SendMessageW(
-                self.settings_win.cmb_color,
-                CB_SETCURSEL,
-                WPARAM(cfg.color_mode as usize),
-                LPARAM(0),
-            );
+            if sync_controls {
+                SendMessageW(
+                    self.settings_win.chk_enabled,
+                    BM_SETCHECK,
+                    WPARAM(if cfg.monitor_enabled {
+                        BST_CHECKED_VAL
+                    } else {
+                        BST_UNCHECKED_VAL
+                    }),
+                    LPARAM(0),
+                );
+                SendMessageW(
+                    self.settings_win.chk_overlay,
+                    BM_SETCHECK,
+                    WPARAM(if cfg.show_overlay {
+                        BST_CHECKED_VAL
+                    } else {
+                        BST_UNCHECKED_VAL
+                    }),
+                    LPARAM(0),
+                );
+                SendMessageW(
+                    self.settings_win.chk_autostart,
+                    BM_SETCHECK,
+                    WPARAM(if cfg.auto_start {
+                        BST_CHECKED_VAL
+                    } else {
+                        BST_UNCHECKED_VAL
+                    }),
+                    LPARAM(0),
+                );
+                SendMessageW(
+                    self.settings_win.cmb_layout,
+                    CB_SETCURSEL,
+                    WPARAM(cfg.layout as usize),
+                    LPARAM(0),
+                );
+                SendMessageW(
+                    self.settings_win.cmb_fontsize,
+                    CB_SETCURSEL,
+                    WPARAM(cfg.font_size as usize),
+                    LPARAM(0),
+                );
+                SendMessageW(
+                    self.settings_win.cmb_color,
+                    CB_SETCURSEL,
+                    WPARAM(cfg.color_mode as usize),
+                    LPARAM(0),
+                );
+                SendMessageW(
+                    self.settings_win.chk_dyn_enabled,
+                    BM_SETCHECK,
+                    WPARAM(if cfg.dynamic_enabled {
+                        BST_CHECKED_VAL
+                    } else {
+                        BST_UNCHECKED_VAL
+                    }),
+                    LPARAM(0),
+                );
+                SendMessageW(
+                    self.settings_win.cmb_dyn_metric,
+                    CB_SETCURSEL,
+                    WPARAM(cfg.dynamic_metric as usize),
+                    LPARAM(0),
+                );
+                SendMessageW(
+                    self.settings_win.chk_limit_enabled,
+                    BM_SETCHECK,
+                    WPARAM(if cfg.limit_enabled {
+                        BST_CHECKED_VAL
+                    } else {
+                        BST_UNCHECKED_VAL
+                    }),
+                    LPARAM(0),
+                );
+                let lim_w = to_wide(&trim_num(cfg.limit_value));
+                let _ = SetWindowTextW(self.settings_win.edt_limit_val, PCWSTR(lim_w.as_ptr()));
+                SendMessageW(
+                    self.settings_win.cmb_limit_unit,
+                    CB_SETCURSEL,
+                    WPARAM(cfg.limit_unit as usize),
+                    LPARAM(0),
+                );
+                populate_rules_listbox(self.settings_win.lst_rules, &cfg.rules);
+            }
         }
     }
 
@@ -437,7 +706,7 @@ impl NetPulseApp {
             let _ = ShowWindow(self.settings_win.hwnd, SW_SHOW);
             let _ = SetForegroundWindow(self.settings_win.hwnd);
         }
-        self.refresh_tray_and_ui();
+        self.refresh_tray_and_ui(true);
     }
 }
 
@@ -454,8 +723,13 @@ impl ApplicationHandler<UserEvent> for NetPulseApp {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
-            UserEvent::Tick | UserEvent::SettingsChanged => {
-                self.refresh_tray_and_ui();
+            UserEvent::Tick => {
+                self.refresh_tray_and_ui(false);
+            }
+            UserEvent::SettingsChanged => {
+                let cfg = self.shared.lock().unwrap().config.clone();
+                save_config(&cfg);
+                self.refresh_tray_and_ui(true);
             }
             UserEvent::TrayClick => {
                 self.show_settings();
@@ -464,29 +738,35 @@ impl ApplicationHandler<UserEvent> for NetPulseApp {
                 if id == self.id_open {
                     self.show_settings();
                 } else if id == self.id_toggle {
-                    {
+                    let cfg = {
                         let mut state = self.shared.lock().unwrap();
                         state.config.monitor_enabled = !state.config.monitor_enabled;
-                    }
-                    self.refresh_tray_and_ui();
+                        state.config.clone()
+                    };
+                    save_config(&cfg);
+                    self.refresh_tray_and_ui(true);
                 } else if id == self.id_overlay {
-                    {
+                    let cfg = {
                         let mut state = self.shared.lock().unwrap();
                         state.config.show_overlay = !state.config.show_overlay;
-                    }
-                    self.refresh_tray_and_ui();
+                        state.config.clone()
+                    };
+                    save_config(&cfg);
+                    self.refresh_tray_and_ui(true);
                 } else if id == self.id_autostart {
-                    let target = {
+                    let (target, cfg) = {
                         let mut state = self.shared.lock().unwrap();
                         let next = !state.config.auto_start;
                         if set_autostart(next).is_ok() {
                             state.config.auto_start = next;
                         }
-                        state.config.auto_start
+                        (state.config.auto_start, state.config.clone())
                     };
+                    save_config(&cfg);
                     self.item_autostart.set_checked(target);
-                    self.refresh_tray_and_ui();
+                    self.refresh_tray_and_ui(true);
                 } else if id == self.id_exit {
+                    delete_limit_balloon(self.overlay_hwnd);
                     self.tray_icon.take();
                     unsafe {
                         let _ = DeleteObject(self.settings_win.ui_font);
@@ -571,7 +851,7 @@ fn utf16_array_to_string(slice: &[u16]) -> String {
 }
 
 // ============================================================================
-// Theme Detection & Formatting Helpers
+// Color Resolution & Dynamic Thresholds
 // ============================================================================
 
 fn is_system_light_taskbar() -> bool {
@@ -600,6 +880,64 @@ fn resolve_text_color(mode: ColorMode) -> (u8, u8, u8) {
         ColorMode::Amber => (251, 191, 36),
     }
 }
+
+fn resolve_effective_color(cfg: &AppConfig, down_bps: u64, up_bps: u64) -> (u8, u8, u8) {
+    if cfg.dynamic_enabled {
+        let speed = match cfg.dynamic_metric {
+            SpeedMetric::Download => down_bps,
+            SpeedMetric::Total => down_bps.saturating_add(up_bps),
+        };
+        for rule in &cfg.rules {
+            if rule.matches(speed) {
+                if rule.is_auto {
+                    return resolve_text_color(ColorMode::Auto);
+                }
+                return rule.rgb;
+            }
+        }
+    }
+    resolve_text_color(cfg.color_mode)
+}
+
+fn preset_color_options() -> [(&'static str, bool, (u8, u8, u8)); 12] {
+    [
+        ("Auto (Theme)", true, (255, 255, 255)),
+        ("White", false, (255, 255, 255)),
+        ("Black", false, (15, 15, 15)),
+        ("Cyan", false, (0, 229, 255)),
+        ("Green", false, (74, 222, 128)),
+        ("Lime", false, (163, 230, 53)),
+        ("Yellow", false, (250, 204, 21)),
+        ("Amber", false, (251, 191, 36)),
+        ("Orange", false, (251, 146, 60)),
+        ("Red", false, (239, 68, 68)),
+        ("Magenta", false, (232, 121, 249)),
+        ("Custom Hex", false, (255, 255, 255)),
+    ]
+}
+
+fn parse_hex_rgb(s: &str) -> Option<(u8, u8, u8)> {
+    let hex = s.trim().trim_start_matches('#');
+    if hex.len() != 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+    Some((r, g, b))
+}
+
+fn trim_num(v: f64) -> String {
+    if (v - v.round()).abs() < 0.001 {
+        format!("{}", v.round() as i64)
+    } else {
+        format!("{:.1}", v)
+    }
+}
+
+// ============================================================================
+// Speed & Byte Formatting Helpers
+// ============================================================================
 
 fn format_speed_compact(bps: u64) -> String {
     const KB: f64 = 1024.0;
@@ -681,7 +1019,7 @@ fn format_bytes(bytes: u64) -> String {
 }
 
 // ============================================================================
-// 1. Dynamic 32x32 GDI Tray Icon Renderer (Maximized Size & ClearType Sharpness)
+// Dynamic 32x32 GDI Tray Icon Renderer
 // ============================================================================
 
 fn render_tray_icon(
@@ -849,7 +1187,7 @@ fn render_tray_icon(
 }
 
 // ============================================================================
-// 2. Floating Click-Through Taskbar Overlay Widget (Next to Clock)
+// Floating Click-Through Taskbar Overlay Widget & Balloon Notification
 // ============================================================================
 
 fn create_overlay_window() -> HWND {
@@ -902,7 +1240,6 @@ fn find_taskbar_overlay_position() -> (i32, i32) {
                 let tray_h = tray_rect.bottom - tray_rect.top;
                 let y = tray_rect.top + (tray_h - OVERLAY_H) / 2;
 
-                // Position immediately to the left of TrayNotifyWnd (system tray & clock)
                 if let Ok(notify_hwnd) =
                     FindWindowExW(tray_hwnd, None, w!("TrayNotifyWnd"), None)
                 {
@@ -925,6 +1262,7 @@ fn update_overlay_window(
     down_bps: u64,
     up_bps: u64,
     rgb: (u8, u8, u8),
+    limit_exceeded: bool,
 ) {
     unsafe {
         if !show {
@@ -945,6 +1283,11 @@ fn update_overlay_window(
 
         let (line1, line2) = if !enabled {
             ("↓ Paused".to_string(), "↑ Paused".to_string())
+        } else if limit_exceeded {
+            (
+                format!("LIMIT! ↓ {}/s", format_speed_long(down_bps)),
+                format!("↑ {}/s", format_speed_long(up_bps)),
+            )
         } else {
             (
                 format!("↓ {}/s", format_speed_long(down_bps)),
@@ -982,7 +1325,6 @@ fn update_overlay_window(
             FillRect(mem_dc, &full_rect, bg_brush);
             let _ = DeleteObject(bg_brush);
 
-            // Windows 11 taskbar clock uses ~12pt Segoe UI (-16px height)
             let font = CreateFontW(
                 -16,
                 0,
@@ -1037,7 +1379,6 @@ fn update_overlay_window(
 
             let _ = GdiFlush();
 
-            // Convert white-on-black coverage into premultiplied BGRA for UpdateLayeredWindow
             if !bits_ptr.is_null() {
                 let pixels = std::slice::from_raw_parts_mut(
                     bits_ptr as *mut u8,
@@ -1046,10 +1387,10 @@ fn update_overlay_window(
                 for px in pixels.chunks_exact_mut(4) {
                     let cov = px[0].max(px[1]).max(px[2]);
                     let a = cov as u16;
-                    px[0] = ((rgb.2 as u16 * a) / 255) as u8; // B
-                    px[1] = ((rgb.1 as u16 * a) / 255) as u8; // G
-                    px[2] = ((rgb.0 as u16 * a) / 255) as u8; // R
-                    px[3] = cov; // A
+                    px[0] = ((rgb.2 as u16 * a) / 255) as u8;
+                    px[1] = ((rgb.1 as u16 * a) / 255) as u8;
+                    px[2] = ((rgb.0 as u16 * a) / 255) as u8;
+                    px[3] = cov;
                 }
             }
 
@@ -1089,6 +1430,207 @@ fn update_overlay_window(
     }
 }
 
+fn show_limit_balloon(hwnd: HWND, used_bytes: u64, limit_bytes: u64) {
+    let title = "NetPulse — Data Limit Reached";
+    let body = format!(
+        "Session usage ({}) has exceeded your configured limit ({}).",
+        format_bytes(used_bytes),
+        format_bytes(limit_bytes)
+    );
+
+    let mut nid = NOTIFYICONDATAW {
+        cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: hwnd,
+        uID: 99,
+        uFlags: NIF_INFO,
+        dwInfoFlags: NIIF_WARNING,
+        ..Default::default()
+    };
+    copy_to_utf16_buf(&mut nid.szInfoTitle, title);
+    copy_to_utf16_buf(&mut nid.szInfo, &body);
+
+    unsafe {
+        let _ = Shell_NotifyIconW(NIM_DELETE, &nid);
+        let _ = Shell_NotifyIconW(NIM_ADD, &nid);
+    }
+}
+
+fn delete_limit_balloon(hwnd: HWND) {
+    let nid = NOTIFYICONDATAW {
+        cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: hwnd,
+        uID: 99,
+        ..Default::default()
+    };
+    unsafe {
+        let _ = Shell_NotifyIconW(NIM_DELETE, &nid);
+    }
+}
+
+fn copy_to_utf16_buf(buf: &mut [u16], text: &str) {
+    let mut i = 0;
+    for ch in text.encode_utf16() {
+        if i + 1 >= buf.len() {
+            break;
+        }
+        buf[i] = ch;
+        i += 1;
+    }
+    if i < buf.len() {
+        buf[i] = 0;
+    }
+}
+
+// ============================================================================
+// Lightweight %APPDATA%\NetPulse\config.ini Persistence (std::fs only)
+// ============================================================================
+
+fn config_file_path() -> Option<PathBuf> {
+    std::env::var_os("APPDATA").map(|dir| PathBuf::from(dir).join("NetPulse").join("config.ini"))
+}
+
+fn load_config() -> AppConfig {
+    let mut cfg = AppConfig::default();
+    let Some(path) = config_file_path() else {
+        return cfg;
+    };
+    let Ok(text) = fs::read_to_string(&path) else {
+        return cfg;
+    };
+
+    let mut parsed_rules = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        match k {
+            "monitor_enabled" => cfg.monitor_enabled = v == "true",
+            "layout" => {
+                cfg.layout = match v {
+                    "1" => TrayLayout::SideBySide,
+                    "2" => TrayLayout::ExtraLargeNumbersOnly,
+                    _ => TrayLayout::Stacked,
+                }
+            }
+            "font_size" => {
+                cfg.font_size = match v {
+                    "0" => FontSizePreset::Small,
+                    "2" => FontSizePreset::Large,
+                    _ => FontSizePreset::Medium,
+                }
+            }
+            "color_mode" => {
+                cfg.color_mode = match v {
+                    "1" => ColorMode::White,
+                    "2" => ColorMode::Black,
+                    "3" => ColorMode::Cyan,
+                    "4" => ColorMode::Green,
+                    "5" => ColorMode::Amber,
+                    _ => ColorMode::Auto,
+                }
+            }
+            "show_overlay" => cfg.show_overlay = v == "true",
+            "dynamic_enabled" => cfg.dynamic_enabled = v == "true",
+            "dynamic_metric" => {
+                cfg.dynamic_metric = if v == "1" {
+                    SpeedMetric::Total
+                } else {
+                    SpeedMetric::Download
+                }
+            }
+            "limit_enabled" => cfg.limit_enabled = v == "true",
+            "limit_value" => {
+                if let Ok(val) = v.parse::<f64>() {
+                    cfg.limit_value = val.max(0.1);
+                }
+            }
+            "limit_unit" => {
+                cfg.limit_unit = if v == "0" { DataUnit::MB } else { DataUnit::GB };
+            }
+            "rule" => {
+                let parts: Vec<&str> = v.split(',').collect();
+                if parts.len() == 9 {
+                    let min_val = parts[0].parse::<f64>().unwrap_or(0.0);
+                    let min_unit = if parts[1] == "2" {
+                        SpeedUnit::MBps
+                    } else {
+                        SpeedUnit::KBps
+                    };
+                    let max_val = parts[2].parse::<f64>().unwrap_or(0.0);
+                    let max_unit = match parts[3] {
+                        "1" => SpeedUnit::KBps,
+                        "2" => SpeedUnit::MBps,
+                        _ => SpeedUnit::Unlimited,
+                    };
+                    let is_auto = parts[4] == "1";
+                    let r = parts[5].parse::<u8>().unwrap_or(255);
+                    let g = parts[6].parse::<u8>().unwrap_or(255);
+                    let b = parts[7].parse::<u8>().unwrap_or(255);
+                    let color_label = parts[8].to_string();
+                    parsed_rules.push(ColorRule {
+                        min_val,
+                        min_unit,
+                        max_val,
+                        max_unit,
+                        is_auto,
+                        rgb: (r, g, b),
+                        color_label,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if !parsed_rules.is_empty() {
+        cfg.rules = parsed_rules;
+    }
+    cfg
+}
+
+fn save_config(cfg: &AppConfig) {
+    let Some(path) = config_file_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+
+    let mut out = String::new();
+    out.push_str(&format!("monitor_enabled={}\n", cfg.monitor_enabled));
+    out.push_str(&format!("layout={}\n", cfg.layout as usize));
+    out.push_str(&format!("font_size={}\n", cfg.font_size as usize));
+    out.push_str(&format!("color_mode={}\n", cfg.color_mode as usize));
+    out.push_str(&format!("show_overlay={}\n", cfg.show_overlay));
+    out.push_str(&format!("dynamic_enabled={}\n", cfg.dynamic_enabled));
+    out.push_str(&format!("dynamic_metric={}\n", cfg.dynamic_metric as usize));
+    out.push_str(&format!("limit_enabled={}\n", cfg.limit_enabled));
+    out.push_str(&format!("limit_value={}\n", cfg.limit_value));
+    out.push_str(&format!("limit_unit={}\n", cfg.limit_unit as usize));
+
+    for rule in &cfg.rules {
+        let clean_label = rule.color_label.replace(',', " ");
+        out.push_str(&format!(
+            "rule={},{},{},{},{},{},{},{},{}\n",
+            rule.min_val,
+            rule.min_unit as usize,
+            rule.max_val,
+            rule.max_unit as usize,
+            if rule.is_auto { 1 } else { 0 },
+            rule.rgb.0,
+            rule.rgb.1,
+            rule.rgb.2,
+            clean_label
+        ));
+    }
+
+    let _ = fs::write(path, out);
+}
+
 // ============================================================================
 // Windows Startup Registry (HKCU\Software\Microsoft\Windows\CurrentVersion\Run)
 // ============================================================================
@@ -1121,6 +1663,7 @@ fn set_autostart(enable: bool) -> std::io::Result<()> {
 fn create_settings_window(
     shared: Arc<Mutex<SharedState>>,
     proxy: EventLoopProxy<UserEvent>,
+    overlay_hwnd: HWND,
 ) -> SettingsWindow {
     unsafe {
         let hmodule = GetModuleHandleW(None).unwrap_or_default();
@@ -1145,8 +1688,8 @@ fn create_settings_window(
             WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
-            410,
-            425,
+            470,
+            685,
             None,
             None,
             hinstance,
@@ -1212,75 +1755,52 @@ fn create_settings_window(
             child
         };
 
-        let lbl_down = make_ctrl(
-            w!("STATIC"),
-            w!("Download:  ↓ 0 B/s"),
-            SS_LEFT_STYLE,
-            20,
-            18,
-            355,
-            22,
-            0,
-        );
-        let lbl_up = make_ctrl(
-            w!("STATIC"),
-            w!("Upload:    ↑ 0 B/s"),
-            SS_LEFT_STYLE,
-            20,
-            44,
-            355,
-            22,
-            0,
-        );
-        let lbl_session = make_ctrl(
-            w!("STATIC"),
-            w!("Session:   ↓ 0 B   |   ↑ 0 B"),
-            SS_LEFT_STYLE,
-            20,
-            72,
-            355,
-            22,
-            0,
-        );
-        let lbl_adapter = make_ctrl(
-            w!("STATIC"),
-            w!("Adapter:   Detecting..."),
-            SS_LEFT_STYLE,
-            20,
-            98,
-            355,
-            22,
-            0,
-        );
+        // Live telemetry labels
+        let lbl_down = make_ctrl(w!("STATIC"), w!("Download:  ↓ 0 B/s"), SS_LEFT_STYLE, 18, 14, 420, 20, 0);
+        let lbl_up = make_ctrl(w!("STATIC"), w!("Upload:    ↑ 0 B/s"), SS_LEFT_STYLE, 18, 36, 420, 20, 0);
+        let lbl_session = make_ctrl(w!("STATIC"), w!("Session:   ↓ 0 B   |   ↑ 0 B"), SS_LEFT_STYLE, 18, 58, 420, 20, 0);
+        let lbl_adapter = make_ctrl(w!("STATIC"), w!("Adapter:   Detecting..."), SS_LEFT_STYLE, 18, 80, 420, 20, 0);
 
+        // General settings
         let chk_enabled = make_ctrl(
             w!("BUTTON"),
             w!("Enable Taskbar Speed Monitor"),
             BS_AUTOCHECKBOX as u32 | WS_TABSTOP.0,
-            20,
-            136,
-            320,
-            24,
+            18,
+            108,
+            240,
+            22,
             ID_CHK_ENABLED,
         );
-
-        let _ = make_ctrl(
-            w!("STATIC"),
-            w!("Tray Icon Layout:"),
-            SS_LEFT_STYLE,
-            20,
-            174,
-            125,
+        let chk_overlay = make_ctrl(
+            w!("BUTTON"),
+            w!("Show Large Taskbar Overlay (Next to Clock)"),
+            BS_AUTOCHECKBOX as u32 | WS_TABSTOP.0,
+            18,
+            134,
+            340,
             22,
-            0,
+            ID_CHK_OVERLAY,
         );
+        let chk_autostart = make_ctrl(
+            w!("BUTTON"),
+            w!("Start automatically with Windows"),
+            BS_AUTOCHECKBOX as u32 | WS_TABSTOP.0,
+            18,
+            160,
+            280,
+            22,
+            ID_CHK_AUTOSTART,
+        );
+
+        let _ = make_ctrl(w!("STATIC"), w!("Tray Icon Layout:"), SS_LEFT_STYLE, 18, 194, 125, 20, 0);
         let cmb_layout = make_ctrl(
             w!("COMBOBOX"),
             w!(""),
             CBS_DROPDOWNLIST as u32 | WS_TABSTOP.0,
-            155,
-            170,
-            220,
+            150,
+            190,
+            285,
             140,
             ID_CMB_LAYOUT,
         );
@@ -1289,119 +1809,285 @@ fn create_settings_window(
             w!("Side-by-Side (↓ ↑)"),
             w!("Extra Large (Numbers Only)"),
         ] {
-            SendMessageW(
-                cmb_layout,
-                CB_ADDSTRING,
-                WPARAM(0),
-                LPARAM(opt.as_ptr() as isize),
-            );
+            SendMessageW(cmb_layout, CB_ADDSTRING, WPARAM(0), LPARAM(opt.as_ptr() as isize));
         }
 
-        let _ = make_ctrl(
-            w!("STATIC"),
-            w!("Font Size:"),
-            SS_LEFT_STYLE,
-            20,
-            208,
-            125,
-            22,
-            0,
-        );
+        let _ = make_ctrl(w!("STATIC"), w!("Font Size:"), SS_LEFT_STYLE, 18, 224, 125, 20, 0);
         let cmb_fontsize = make_ctrl(
             w!("COMBOBOX"),
             w!(""),
             CBS_DROPDOWNLIST as u32 | WS_TABSTOP.0,
-            155,
-            204,
+            150,
             220,
+            120,
             120,
             ID_CMB_FONTSIZE,
         );
         for opt in [w!("Small"), w!("Medium"), w!("Large")] {
-            SendMessageW(
-                cmb_fontsize,
-                CB_ADDSTRING,
-                WPARAM(0),
-                LPARAM(opt.as_ptr() as isize),
-            );
+            SendMessageW(cmb_fontsize, CB_ADDSTRING, WPARAM(0), LPARAM(opt.as_ptr() as isize));
         }
 
-        let _ = make_ctrl(
-            w!("STATIC"),
-            w!("Text Color:"),
-            SS_LEFT_STYLE,
-            20,
-            242,
-            125,
-            22,
-            0,
-        );
+        let _ = make_ctrl(w!("STATIC"), w!("Static Color:"), SS_LEFT_STYLE, 282, 224, 80, 20, 0);
         let cmb_color = make_ctrl(
             w!("COMBOBOX"),
             w!(""),
             CBS_DROPDOWNLIST as u32 | WS_TABSTOP.0,
-            155,
-            238,
+            365,
             220,
+            70,
             160,
             ID_CMB_COLOR,
         );
         for opt in [
-            w!("Auto (System Theme)"),
+            w!("Auto"),
             w!("White"),
             w!("Black"),
             w!("Cyan"),
             w!("Green"),
             w!("Amber"),
         ] {
-            SendMessageW(
-                cmb_color,
-                CB_ADDSTRING,
-                WPARAM(0),
-                LPARAM(opt.as_ptr() as isize),
-            );
+            SendMessageW(cmb_color, CB_ADDSTRING, WPARAM(0), LPARAM(opt.as_ptr() as isize));
         }
 
-        let chk_autostart = make_ctrl(
+        // Dynamic Speed Colors Section
+        let _ = make_ctrl(
+            w!("STATIC"),
+            w!("─── Dynamic Speed Colors ─────────────────────────────"),
+            SS_LEFT_STYLE,
+            18,
+            258,
+            420,
+            18,
+            0,
+        );
+        let chk_dyn_enabled = make_ctrl(
             w!("BUTTON"),
-            w!("Start automatically with Windows"),
+            w!("Enable Dynamic Color Rules"),
             BS_AUTOCHECKBOX as u32 | WS_TABSTOP.0,
-            20,
+            18,
+            280,
+            200,
+            22,
+            ID_CHK_DYN_ENABLED,
+        );
+        let _ = make_ctrl(w!("STATIC"), w!("Measure:"), SS_LEFT_STYLE, 228, 282, 58, 20, 0);
+        let cmb_dyn_metric = make_ctrl(
+            w!("COMBOBOX"),
+            w!(""),
+            CBS_DROPDOWNLIST as u32 | WS_TABSTOP.0,
+            290,
             278,
-            320,
-            24,
-            ID_CHK_AUTOSTART,
+            145,
+            100,
+            ID_CMB_DYN_METRIC,
+        );
+        for opt in [w!("Download Speed"), w!("Total (↓ + ↑)")] {
+            SendMessageW(cmb_dyn_metric, CB_ADDSTRING, WPARAM(0), LPARAM(opt.as_ptr() as isize));
+        }
+
+        let lst_rules = make_ctrl(
+            w!("LISTBOX"),
+            w!(""),
+            LBS_NOTIFY_STYLE | WS_VSCROLL.0 | WS_BORDER.0 | WS_TABSTOP.0,
+            18,
+            308,
+            417,
+            95,
+            ID_LST_RULES,
         );
 
-        let chk_overlay = make_ctrl(
+        let _ = make_ctrl(w!("STATIC"), w!("Min:"), SS_LEFT_STYLE, 18, 412, 32, 20, 0);
+        let edt_min = make_ctrl(
+            w!("EDIT"),
+            w!("0"),
+            ES_AUTOHSCROLL_STYLE | WS_BORDER.0 | WS_TABSTOP.0,
+            52,
+            410,
+            58,
+            22,
+            ID_EDT_MIN,
+        );
+        let cmb_min_unit = make_ctrl(
+            w!("COMBOBOX"),
+            w!(""),
+            CBS_DROPDOWNLIST as u32 | WS_TABSTOP.0,
+            114,
+            409,
+            66,
+            100,
+            ID_CMB_MIN_UNIT,
+        );
+        for opt in [w!("KB/s"), w!("MB/s")] {
+            SendMessageW(cmb_min_unit, CB_ADDSTRING, WPARAM(0), LPARAM(opt.as_ptr() as isize));
+        }
+        SendMessageW(cmb_min_unit, CB_SETCURSEL, WPARAM(0), LPARAM(0));
+
+        let _ = make_ctrl(w!("STATIC"), w!("Max:"), SS_LEFT_STYLE, 192, 412, 32, 20, 0);
+        let edt_max = make_ctrl(
+            w!("EDIT"),
+            w!("500"),
+            ES_AUTOHSCROLL_STYLE | WS_BORDER.0 | WS_TABSTOP.0,
+            226,
+            410,
+            58,
+            22,
+            ID_EDT_MAX,
+        );
+        let cmb_max_unit = make_ctrl(
+            w!("COMBOBOX"),
+            w!(""),
+            CBS_DROPDOWNLIST as u32 | WS_TABSTOP.0,
+            288,
+            409,
+            95,
+            120,
+            ID_CMB_MAX_UNIT,
+        );
+        for opt in [w!("Unlimited"), w!("KB/s"), w!("MB/s")] {
+            SendMessageW(cmb_max_unit, CB_ADDSTRING, WPARAM(0), LPARAM(opt.as_ptr() as isize));
+        }
+        SendMessageW(cmb_max_unit, CB_SETCURSEL, WPARAM(1), LPARAM(0));
+
+        let _ = make_ctrl(w!("STATIC"), w!("Color:"), SS_LEFT_STYLE, 18, 444, 42, 20, 0);
+        let cmb_rule_color = make_ctrl(
+            w!("COMBOBOX"),
+            w!(""),
+            CBS_DROPDOWNLIST as u32 | WS_TABSTOP.0,
+            64,
+            440,
+            125,
+            220,
+            ID_CMB_RULE_COLOR,
+        );
+        for (name, _, _) in preset_color_options() {
+            let wname = to_wide(name);
+            SendMessageW(
+                cmb_rule_color,
+                CB_ADDSTRING,
+                WPARAM(0),
+                LPARAM(wname.as_ptr() as isize),
+            );
+        }
+        SendMessageW(cmb_rule_color, CB_SETCURSEL, WPARAM(4), LPARAM(0));
+
+        let _ = make_ctrl(w!("STATIC"), w!("Hex:"), SS_LEFT_STYLE, 198, 444, 30, 20, 0);
+        let edt_rule_hex = make_ctrl(
+            w!("EDIT"),
+            w!("#4ADE80"),
+            ES_AUTOHSCROLL_STYLE | WS_BORDER.0 | WS_TABSTOP.0,
+            232,
+            441,
+            78,
+            22,
+            ID_EDT_RULE_HEX,
+        );
+        let _ = make_ctrl(
             w!("BUTTON"),
-            w!("Show Large Taskbar Overlay (Next to Clock)"),
-            BS_AUTOCHECKBOX as u32 | WS_TABSTOP.0,
-            20,
-            308,
-            355,
+            w!("Pick Color..."),
+            BS_PUSHBUTTON as u32 | WS_TABSTOP.0,
+            318,
+            440,
+            117,
             24,
-            ID_CHK_OVERLAY,
+            ID_BTN_PICK_COLOR,
         );
 
         let _ = make_ctrl(
             w!("BUTTON"),
-            w!("Reset Session"),
+            w!("Add Rule"),
             BS_PUSHBUTTON as u32 | WS_TABSTOP.0,
-            20,
-            346,
-            135,
-            30,
+            18,
+            472,
+            130,
+            26,
+            ID_BTN_ADD_RULE,
+        );
+        let _ = make_ctrl(
+            w!("BUTTON"),
+            w!("Update Selected"),
+            BS_PUSHBUTTON as u32 | WS_TABSTOP.0,
+            161,
+            472,
+            130,
+            26,
+            ID_BTN_UPD_RULE,
+        );
+        let _ = make_ctrl(
+            w!("BUTTON"),
+            w!("Delete Selected"),
+            BS_PUSHBUTTON as u32 | WS_TABSTOP.0,
+            305,
+            472,
+            130,
+            26,
+            ID_BTN_DEL_RULE,
+        );
+
+        // Data Usage Limit Section
+        let _ = make_ctrl(
+            w!("STATIC"),
+            w!("─── Data Usage Limit (Session) ───────────────────────"),
+            SS_LEFT_STYLE,
+            18,
+            510,
+            420,
+            18,
+            0,
+        );
+        let chk_limit_enabled = make_ctrl(
+            w!("BUTTON"),
+            w!("Enable Data Limit Alert"),
+            BS_AUTOCHECKBOX as u32 | WS_TABSTOP.0,
+            18,
+            534,
+            185,
+            22,
+            ID_CHK_LIMIT_ENABLED,
+        );
+        let _ = make_ctrl(w!("STATIC"), w!("Limit:"), SS_LEFT_STYLE, 215, 536, 38, 20, 0);
+        let edt_limit_val = make_ctrl(
+            w!("EDIT"),
+            w!("1"),
+            ES_AUTOHSCROLL_STYLE | WS_BORDER.0 | WS_TABSTOP.0,
+            258,
+            534,
+            70,
+            22,
+            ID_EDT_LIMIT_VAL,
+        );
+        let cmb_limit_unit = make_ctrl(
+            w!("COMBOBOX"),
+            w!(""),
+            CBS_DROPDOWNLIST as u32 | WS_TABSTOP.0,
+            335,
+            533,
+            100,
+            100,
+            ID_CMB_LIMIT_UNIT,
+        );
+        for opt in [w!("MB"), w!("GB")] {
+            SendMessageW(cmb_limit_unit, CB_ADDSTRING, WPARAM(0), LPARAM(opt.as_ptr() as isize));
+        }
+
+        // Bottom Actions
+        let _ = make_ctrl(
+            w!("BUTTON"),
+            w!("Reset Session & Alert"),
+            BS_PUSHBUTTON as u32 | WS_TABSTOP.0,
+            18,
+            584,
+            190,
+            32,
             ID_BTN_RESET,
         );
         let _ = make_ctrl(
             w!("BUTTON"),
             w!("Hide to Tray"),
             BS_PUSHBUTTON as u32 | WS_TABSTOP.0,
-            240,
-            346,
-            135,
-            30,
+            245,
+            584,
+            190,
+            32,
             ID_BTN_HIDE,
         );
 
@@ -1414,6 +2100,19 @@ fn create_settings_window(
             cmb_layout,
             cmb_fontsize,
             cmb_color,
+            chk_dyn_enabled,
+            cmb_dyn_metric,
+            lst_rules,
+            edt_min,
+            cmb_min_unit,
+            edt_max,
+            cmb_max_unit,
+            cmb_rule_color,
+            edt_rule_hex,
+            chk_limit_enabled,
+            edt_limit_val,
+            cmb_limit_unit,
+            overlay_hwnd,
         });
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(user_data) as isize);
         let _ = UpdateWindow(hwnd);
@@ -1430,8 +2129,75 @@ fn create_settings_window(
             cmb_layout,
             cmb_fontsize,
             cmb_color,
+            chk_dyn_enabled,
+            cmb_dyn_metric,
+            lst_rules,
+            chk_limit_enabled,
+            edt_limit_val,
+            cmb_limit_unit,
             ui_font,
         }
+    }
+}
+
+unsafe fn populate_rules_listbox(lst: HWND, rules: &[ColorRule]) {
+    let prev_sel = SendMessageW(lst, LB_GETCURSEL, WPARAM(0), LPARAM(0)).0;
+    SendMessageW(lst, LB_RESETCONTENT, WPARAM(0), LPARAM(0));
+    for rule in rules {
+        let wtext = to_wide(&rule.display_text());
+        SendMessageW(lst, LB_ADDSTRING, WPARAM(0), LPARAM(wtext.as_ptr() as isize));
+    }
+    if prev_sel >= 0 && (prev_sel as usize) < rules.len() {
+        SendMessageW(lst, LB_SETCURSEL, WPARAM(prev_sel as usize), LPARAM(0));
+    }
+}
+
+unsafe fn get_edit_text(hwnd: HWND) -> String {
+    let mut buf = [0u16; 128];
+    let len = GetWindowTextW(hwnd, &mut buf);
+    if len <= 0 {
+        return String::new();
+    }
+    String::from_utf16_lossy(&buf[..len as usize]).trim().to_string()
+}
+
+unsafe fn read_rule_from_inputs(data: &WindowUserData) -> ColorRule {
+    let min_val = get_edit_text(data.edt_min).parse::<f64>().unwrap_or(0.0).max(0.0);
+    let min_unit_idx = SendMessageW(data.cmb_min_unit, CB_GETCURSEL, WPARAM(0), LPARAM(0)).0;
+    let min_unit = if min_unit_idx == 1 {
+        SpeedUnit::MBps
+    } else {
+        SpeedUnit::KBps
+    };
+
+    let max_val = get_edit_text(data.edt_max).parse::<f64>().unwrap_or(0.0).max(0.0);
+    let max_unit_idx = SendMessageW(data.cmb_max_unit, CB_GETCURSEL, WPARAM(0), LPARAM(0)).0;
+    let max_unit = match max_unit_idx {
+        1 => SpeedUnit::KBps,
+        2 => SpeedUnit::MBps,
+        _ => SpeedUnit::Unlimited,
+    };
+
+    let col_idx = SendMessageW(data.cmb_rule_color, CB_GETCURSEL, WPARAM(0), LPARAM(0)).0;
+    let presets = preset_color_options();
+    let (preset_name, is_auto, preset_rgb) = if col_idx >= 0 && (col_idx as usize) < presets.len()
+    {
+        presets[col_idx as usize]
+    } else {
+        ("Custom", false, (255, 255, 255))
+    };
+
+    let hex_str = get_edit_text(data.edt_rule_hex);
+    let rgb = parse_hex_rgb(&hex_str).unwrap_or(preset_rgb);
+
+    ColorRule {
+        min_val,
+        min_unit,
+        max_val,
+        max_unit,
+        is_auto,
+        rgb,
+        color_label: preset_name.to_string(),
     }
 }
 
@@ -1489,7 +2255,7 @@ unsafe extern "system" fn settings_wnd_proc(
                         }
                         let _ = data.proxy.send_event(UserEvent::SettingsChanged);
                     }
-                    ID_CMB_LAYOUT if notif == 1 => {
+                    ID_CMB_LAYOUT if notif == CBN_SELCHANGE_NOTIF => {
                         let idx =
                             SendMessageW(data.cmb_layout, CB_GETCURSEL, WPARAM(0), LPARAM(0)).0;
                         data.shared.lock().unwrap().config.layout = match idx {
@@ -1499,7 +2265,7 @@ unsafe extern "system" fn settings_wnd_proc(
                         };
                         let _ = data.proxy.send_event(UserEvent::SettingsChanged);
                     }
-                    ID_CMB_FONTSIZE if notif == 1 => {
+                    ID_CMB_FONTSIZE if notif == CBN_SELCHANGE_NOTIF => {
                         let idx =
                             SendMessageW(data.cmb_fontsize, CB_GETCURSEL, WPARAM(0), LPARAM(0)).0;
                         data.shared.lock().unwrap().config.font_size = match idx {
@@ -1509,7 +2275,7 @@ unsafe extern "system" fn settings_wnd_proc(
                         };
                         let _ = data.proxy.send_event(UserEvent::SettingsChanged);
                     }
-                    ID_CMB_COLOR if notif == 1 => {
+                    ID_CMB_COLOR if notif == CBN_SELCHANGE_NOTIF => {
                         let idx =
                             SendMessageW(data.cmb_color, CB_GETCURSEL, WPARAM(0), LPARAM(0)).0;
                         data.shared.lock().unwrap().config.color_mode = match idx {
@@ -1522,10 +2288,188 @@ unsafe extern "system" fn settings_wnd_proc(
                         };
                         let _ = data.proxy.send_event(UserEvent::SettingsChanged);
                     }
+                    ID_CHK_DYN_ENABLED => {
+                        let checked =
+                            SendMessageW(data.chk_dyn_enabled, BM_GETCHECK, WPARAM(0), LPARAM(0)).0
+                                as usize
+                                == BST_CHECKED_VAL;
+                        data.shared.lock().unwrap().config.dynamic_enabled = checked;
+                        let _ = data.proxy.send_event(UserEvent::SettingsChanged);
+                    }
+                    ID_CMB_DYN_METRIC if notif == CBN_SELCHANGE_NOTIF => {
+                        let idx =
+                            SendMessageW(data.cmb_dyn_metric, CB_GETCURSEL, WPARAM(0), LPARAM(0)).0;
+                        data.shared.lock().unwrap().config.dynamic_metric = if idx == 1 {
+                            SpeedMetric::Total
+                        } else {
+                            SpeedMetric::Download
+                        };
+                        let _ = data.proxy.send_event(UserEvent::SettingsChanged);
+                    }
+                    ID_LST_RULES if notif == LBN_SELCHANGE_NOTIF => {
+                        let sel = SendMessageW(data.lst_rules, LB_GETCURSEL, WPARAM(0), LPARAM(0)).0;
+                        if sel >= 0 {
+                            let state = data.shared.lock().unwrap();
+                            if let Some(rule) = state.config.rules.get(sel as usize) {
+                                let wmin = to_wide(&trim_num(rule.min_val));
+                                let _ = SetWindowTextW(data.edt_min, PCWSTR(wmin.as_ptr()));
+                                SendMessageW(
+                                    data.cmb_min_unit,
+                                    CB_SETCURSEL,
+                                    WPARAM(if rule.min_unit == SpeedUnit::MBps { 1 } else { 0 }),
+                                    LPARAM(0),
+                                );
+
+                                let wmax = to_wide(&trim_num(rule.max_val));
+                                let _ = SetWindowTextW(data.edt_max, PCWSTR(wmax.as_ptr()));
+                                SendMessageW(
+                                    data.cmb_max_unit,
+                                    CB_SETCURSEL,
+                                    WPARAM(rule.max_unit as usize),
+                                    LPARAM(0),
+                                );
+
+                                let whex = to_wide(&format!(
+                                    "#{:02X}{:02X}{:02X}",
+                                    rule.rgb.0, rule.rgb.1, rule.rgb.2
+                                ));
+                                let _ = SetWindowTextW(data.edt_rule_hex, PCWSTR(whex.as_ptr()));
+
+                                let presets = preset_color_options();
+                                let found = presets
+                                    .iter()
+                                    .position(|(name, _, _)| *name == rule.color_label)
+                                    .unwrap_or(presets.len() - 1);
+                                SendMessageW(data.cmb_rule_color, CB_SETCURSEL, WPARAM(found), LPARAM(0));
+                            }
+                        }
+                    }
+                    ID_CMB_RULE_COLOR if notif == CBN_SELCHANGE_NOTIF => {
+                        let idx =
+                            SendMessageW(data.cmb_rule_color, CB_GETCURSEL, WPARAM(0), LPARAM(0)).0;
+                        let presets = preset_color_options();
+                        if idx >= 0 && (idx as usize) < presets.len() - 1 {
+                            let (_, _, rgb) = presets[idx as usize];
+                            let whex = to_wide(&format!("#{:02X}{:02X}{:02X}", rgb.0, rgb.1, rgb.2));
+                            let _ = SetWindowTextW(data.edt_rule_hex, PCWSTR(whex.as_ptr()));
+                        }
+                    }
+                    ID_BTN_PICK_COLOR => {
+                        let cur_rgb = parse_hex_rgb(&get_edit_text(data.edt_rule_hex))
+                            .unwrap_or((74, 222, 128));
+                        let bgr = ((cur_rgb.2 as u32) << 16)
+                            | ((cur_rgb.1 as u32) << 8)
+                            | (cur_rgb.0 as u32);
+                        let mut cust_colors = [COLORREF(0x00FF_FFFF); 16];
+                        let mut cc = CHOOSECOLORW {
+                            lStructSize: std::mem::size_of::<CHOOSECOLORW>() as u32,
+                            hwndOwner: hwnd,
+                            rgbResult: COLORREF(bgr),
+                            lpCustColors: cust_colors.as_mut_ptr(),
+                            Flags: CC_FULLOPEN | CC_RGBINIT,
+                            ..Default::default()
+                        };
+                        if ChooseColorW(&mut cc).as_bool() {
+                            let r = (cc.rgbResult.0 & 0xFF) as u8;
+                            let g = ((cc.rgbResult.0 >> 8) & 0xFF) as u8;
+                            let b = ((cc.rgbResult.0 >> 16) & 0xFF) as u8;
+                            let whex = to_wide(&format!("#{:02X}{:02X}{:02X}", r, g, b));
+                            let _ = SetWindowTextW(data.edt_rule_hex, PCWSTR(whex.as_ptr()));
+                            let custom_idx = preset_color_options().len() - 1;
+                            SendMessageW(
+                                data.cmb_rule_color,
+                                CB_SETCURSEL,
+                                WPARAM(custom_idx),
+                                LPARAM(0),
+                            );
+                        }
+                    }
+                    ID_BTN_ADD_RULE => {
+                        let rule = read_rule_from_inputs(data);
+                        data.shared.lock().unwrap().config.rules.push(rule);
+                        let _ = data.proxy.send_event(UserEvent::SettingsChanged);
+                    }
+                    ID_BTN_UPD_RULE => {
+                        let sel = SendMessageW(data.lst_rules, LB_GETCURSEL, WPARAM(0), LPARAM(0)).0;
+                        if sel >= 0 {
+                            let rule = read_rule_from_inputs(data);
+                            let mut state = data.shared.lock().unwrap();
+                            if let Some(slot) = state.config.rules.get_mut(sel as usize) {
+                                *slot = rule;
+                            }
+                            drop(state);
+                            let _ = data.proxy.send_event(UserEvent::SettingsChanged);
+                        }
+                    }
+                    ID_BTN_DEL_RULE => {
+                        let sel = SendMessageW(data.lst_rules, LB_GETCURSEL, WPARAM(0), LPARAM(0)).0;
+                        if sel >= 0 {
+                            let mut state = data.shared.lock().unwrap();
+                            if (sel as usize) < state.config.rules.len() {
+                                state.config.rules.remove(sel as usize);
+                            }
+                            drop(state);
+                            let _ = data.proxy.send_event(UserEvent::SettingsChanged);
+                        }
+                    }
+                    ID_CHK_LIMIT_ENABLED => {
+                        let checked =
+                            SendMessageW(data.chk_limit_enabled, BM_GETCHECK, WPARAM(0), LPARAM(0))
+                                .0 as usize
+                                == BST_CHECKED_VAL;
+                        let lim_val = get_edit_text(data.edt_limit_val)
+                            .parse::<f64>()
+                            .unwrap_or(1.0)
+                            .max(0.1);
+                        let unit_idx =
+                            SendMessageW(data.cmb_limit_unit, CB_GETCURSEL, WPARAM(0), LPARAM(0)).0;
+                        let mut state = data.shared.lock().unwrap();
+                        state.config.limit_enabled = checked;
+                        state.config.limit_value = lim_val;
+                        state.config.limit_unit = if unit_idx == 0 {
+                            DataUnit::MB
+                        } else {
+                            DataUnit::GB
+                        };
+                        state.stats.alert_triggered = false;
+                        drop(state);
+                        let _ = data.proxy.send_event(UserEvent::SettingsChanged);
+                    }
+                    ID_CMB_LIMIT_UNIT if notif == CBN_SELCHANGE_NOTIF => {
+                        let lim_val = get_edit_text(data.edt_limit_val)
+                            .parse::<f64>()
+                            .unwrap_or(1.0)
+                            .max(0.1);
+                        let unit_idx =
+                            SendMessageW(data.cmb_limit_unit, CB_GETCURSEL, WPARAM(0), LPARAM(0)).0;
+                        let mut state = data.shared.lock().unwrap();
+                        state.config.limit_value = lim_val;
+                        state.config.limit_unit = if unit_idx == 0 {
+                            DataUnit::MB
+                        } else {
+                            DataUnit::GB
+                        };
+                        state.stats.alert_triggered = false;
+                        drop(state);
+                        let _ = data.proxy.send_event(UserEvent::SettingsChanged);
+                    }
+                    ID_EDT_LIMIT_VAL if notif == 0x0300 => {
+                        // EN_CHANGE
+                        if let Ok(lim_val) = get_edit_text(data.edt_limit_val).parse::<f64>() {
+                            if lim_val > 0.0 {
+                                let mut state = data.shared.lock().unwrap();
+                                state.config.limit_value = lim_val;
+                                state.stats.alert_triggered = false;
+                            }
+                        }
+                    }
                     ID_BTN_RESET => {
                         let mut state = data.shared.lock().unwrap();
                         state.stats.session_down_bytes = 0;
                         state.stats.session_up_bytes = 0;
+                        state.stats.alert_triggered = false;
+                        drop(state);
+                        delete_limit_balloon(data.overlay_hwnd);
                         let _ = data.proxy.send_event(UserEvent::SettingsChanged);
                     }
                     ID_BTN_HIDE => {
