@@ -1,6 +1,6 @@
 [package]
 name = "netpulse-tray"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 authors = ["NetPulse Contributors"]
 description = "Ultra-lightweight Windows System Tray internet download and upload speed monitor."
@@ -24,6 +24,8 @@ features = [
     "Win32_NetworkManagement_IpHelper",
     "Win32_NetworkManagement_Ndis",
     "Win32_System_LibraryLoader",
+    "Win32_UI_Controls_Dialogs",
+    "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ]
 
