@@ -7,26 +7,31 @@ use std::time::{Duration, Instant};
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{
+    COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
+};
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
 use windows::Win32::Graphics::Gdi::{
     CreateCompatibleDC, CreateDIBSection, CreateFontW, CreateSolidBrush, DeleteDC, DeleteObject,
-    DrawTextW, FillRect, GdiFlush, InvalidateRect, SelectObject, SetBkMode, SetTextColor,
-    UpdateWindow, ANTIALIASED_QUALITY, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CLIP_DEFAULT_PRECIS,
-    COLOR_WINDOW, DEFAULT_CHARSET, DEFAULT_PITCH, DIB_RGB_COLORS, DT_CENTER, DT_NOPREFIX,
-    DT_SINGLELINE, DT_VCENTER, FF_SWISS, FW_BOLD, HBRUSH, HFONT, OUT_TT_PRECIS, TRANSPARENT,
+    DrawTextW, FillRect, GdiFlush, GetDC, InvalidateRect, ReleaseDC, SelectObject, SetBkMode,
+    SetTextColor, UpdateWindow, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+    BLENDFUNCTION, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, COLOR_WINDOW, DEFAULT_CHARSET,
+    DEFAULT_PITCH, DIB_RGB_COLORS, DT_CENTER, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER,
+    FF_SWISS, FW_BOLD, FW_EXTRABOLD, HBRUSH, HDC, HFONT, OUT_TT_PRECIS, TRANSPARENT,
 };
 use windows::Win32::NetworkManagement::IpHelper::{FreeMibTable, GetIfTable2, MIB_IF_TABLE2};
 use windows::Win32::NetworkManagement::Ndis::IfOperStatusUp;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongPtrW, LoadCursorW,
-    RegisterClassExW, SendMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowTextW,
-    ShowWindow, BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX, BS_PUSHBUTTON, CB_ADDSTRING,
-    CB_GETCURSEL, CB_SETCURSEL, CBS_DROPDOWNLIST, CW_USEDEFAULT, GWLP_USERDATA, HMENU, IDC_ARROW,
-    SW_HIDE, SW_SHOW, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_SETFONT,
-    WM_SETTINGCHANGE, WNDCLASSEXW, WS_CAPTION, WS_CHILD, WS_MINIMIZEBOX, WS_OVERLAPPED,
-    WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, FindWindowExW, FindWindowW, GetWindowLongPtrW,
+    GetWindowRect, LoadCursorW, RegisterClassExW, SendMessageW, SetForegroundWindow,
+    SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, UpdateLayeredWindow, BM_GETCHECK,
+    BM_SETCHECK, BS_AUTOCHECKBOX, BS_PUSHBUTTON, CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL,
+    CBS_DROPDOWNLIST, CW_USEDEFAULT, GWLP_USERDATA, HMENU, HWND_TOPMOST, IDC_ARROW, SWP_NOACTIVATE,
+    SWP_SHOWWINDOW, SW_HIDE, SW_SHOW, ULW_ALPHA, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_DESTROY,
+    WM_SETFONT, WM_SETTINGCHANGE, WNDCLASSEXW, WS_CAPTION, WS_CHILD, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_MINIMIZEBOX,
+    WS_OVERLAPPED, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
@@ -45,6 +50,10 @@ const BST_CHECKED_VAL: usize = 1;
 const BST_UNCHECKED_VAL: usize = 0;
 const SS_LEFT_STYLE: u32 = 0;
 
+// Overlay widget dimensions (positioned next to Windows 11 clock)
+const OVERLAY_W: i32 = 136;
+const OVERLAY_H: i32 = 44;
+
 // Control IDs for native Win32 Settings Window
 const ID_CHK_ENABLED: usize = 1001;
 const ID_CHK_AUTOSTART: usize = 1002;
@@ -53,11 +62,13 @@ const ID_CMB_FONTSIZE: usize = 1004;
 const ID_CMB_COLOR: usize = 1005;
 const ID_BTN_RESET: usize = 1006;
 const ID_BTN_HIDE: usize = 1007;
+const ID_CHK_OVERLAY: usize = 1008;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TrayLayout {
     Stacked = 0,
     SideBySide = 1,
+    ExtraLargeNumbersOnly = 2,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -84,6 +95,7 @@ struct AppConfig {
     font_size: FontSizePreset,
     color_mode: ColorMode,
     auto_start: bool,
+    show_overlay: bool,
 }
 
 impl Default for AppConfig {
@@ -94,6 +106,7 @@ impl Default for AppConfig {
             font_size: FontSizePreset::Medium,
             color_mode: ColorMode::Auto,
             auto_start: is_autostart_enabled(),
+            show_overlay: false,
         }
     }
 }
@@ -128,6 +141,7 @@ struct SettingsWindow {
     lbl_adapter: HWND,
     chk_enabled: HWND,
     chk_autostart: HWND,
+    chk_overlay: HWND,
     cmb_layout: HWND,
     cmb_fontsize: HWND,
     cmb_color: HWND,
@@ -139,6 +153,7 @@ struct WindowUserData {
     proxy: EventLoopProxy<UserEvent>,
     chk_enabled: HWND,
     chk_autostart: HWND,
+    chk_overlay: HWND,
     cmb_layout: HWND,
     cmb_fontsize: HWND,
     cmb_color: HWND,
@@ -180,6 +195,7 @@ fn main() {
     let menu = Menu::new();
     let item_open = MenuItem::new("Open Settings", true, None);
     let item_toggle = CheckMenuItem::new("Enable Taskbar Monitor", true, true, None);
+    let item_overlay = CheckMenuItem::new("Show Large Taskbar Overlay", true, false, None);
     let item_autostart = CheckMenuItem::new(
         "Start with Windows",
         true,
@@ -191,6 +207,7 @@ fn main() {
     menu.append(&item_open).unwrap();
     menu.append(&PredefinedMenuItem::separator()).unwrap();
     menu.append(&item_toggle).unwrap();
+    menu.append(&item_overlay).unwrap();
     menu.append(&item_autostart).unwrap();
     menu.append(&PredefinedMenuItem::separator()).unwrap();
     menu.append(&item_exit).unwrap();
@@ -259,16 +276,20 @@ fn main() {
     });
 
     let settings_win = create_settings_window(Arc::clone(&shared), proxy.clone());
+    let overlay_hwnd = create_overlay_window();
 
     let mut app = NetPulseApp {
         shared,
         tray_icon: Some(tray_icon),
         settings_win,
+        overlay_hwnd,
         id_open: item_open.id().clone(),
         id_toggle: item_toggle.id().clone(),
+        id_overlay: item_overlay.id().clone(),
         id_autostart: item_autostart.id().clone(),
         id_exit: item_exit.id().clone(),
         item_toggle,
+        item_overlay,
         item_autostart,
     };
 
@@ -280,11 +301,14 @@ struct NetPulseApp {
     shared: Arc<Mutex<SharedState>>,
     tray_icon: Option<TrayIcon>,
     settings_win: SettingsWindow,
+    overlay_hwnd: HWND,
     id_open: MenuId,
     id_toggle: MenuId,
+    id_overlay: MenuId,
     id_autostart: MenuId,
     id_exit: MenuId,
     item_toggle: CheckMenuItem,
+    item_overlay: CheckMenuItem,
     item_autostart: CheckMenuItem,
 }
 
@@ -322,7 +346,18 @@ impl NetPulseApp {
             let _ = tray.set_tooltip(Some(tip));
         }
 
+        // Update or hide the floating Taskbar Overlay Widget
+        update_overlay_window(
+            self.overlay_hwnd,
+            cfg.show_overlay,
+            cfg.monitor_enabled,
+            stats.down_bps,
+            stats.up_bps,
+            color,
+        );
+
         self.item_toggle.set_checked(cfg.monitor_enabled);
+        self.item_overlay.set_checked(cfg.show_overlay);
         self.item_autostart.set_checked(cfg.auto_start);
 
         unsafe {
@@ -350,6 +385,16 @@ impl NetPulseApp {
                 self.settings_win.chk_enabled,
                 BM_SETCHECK,
                 WPARAM(if cfg.monitor_enabled {
+                    BST_CHECKED_VAL
+                } else {
+                    BST_UNCHECKED_VAL
+                }),
+                LPARAM(0),
+            );
+            SendMessageW(
+                self.settings_win.chk_overlay,
+                BM_SETCHECK,
+                WPARAM(if cfg.show_overlay {
                     BST_CHECKED_VAL
                 } else {
                     BST_UNCHECKED_VAL
@@ -424,6 +469,12 @@ impl ApplicationHandler<UserEvent> for NetPulseApp {
                         state.config.monitor_enabled = !state.config.monitor_enabled;
                     }
                     self.refresh_tray_and_ui();
+                } else if id == self.id_overlay {
+                    {
+                        let mut state = self.shared.lock().unwrap();
+                        state.config.show_overlay = !state.config.show_overlay;
+                    }
+                    self.refresh_tray_and_ui();
                 } else if id == self.id_autostart {
                     let target = {
                         let mut state = self.shared.lock().unwrap();
@@ -439,6 +490,7 @@ impl ApplicationHandler<UserEvent> for NetPulseApp {
                     self.tray_icon.take();
                     unsafe {
                         let _ = DeleteObject(self.settings_win.ui_font);
+                        let _ = DestroyWindow(self.overlay_hwnd);
                         let _ = DestroyWindow(self.settings_win.hwnd);
                     }
                     event_loop.exit();
@@ -471,11 +523,9 @@ fn sample_network_totals() -> NetSample {
             let rows = std::slice::from_raw_parts((*table_ptr).Table.as_ptr(), count);
 
             for row in rows {
-                // Skip non-operational or loopback interfaces (IF_TYPE_SOFTWARE_LOOPBACK = 24)
                 if row.OperStatus != IfOperStatusUp || row.Type == 24 {
                     continue;
                 }
-                // Skip interfaces without a physical MAC (e.g., virtual/tunnel pseudo-adapters)
                 if row.PhysicalAddressLength == 0 {
                     continue;
                 }
@@ -538,9 +588,9 @@ fn resolve_text_color(mode: ColorMode) -> (u8, u8, u8) {
     match mode {
         ColorMode::Auto => {
             if is_system_light_taskbar() {
-                (15, 15, 15) // Crisp dark text for Light Taskbar
+                (15, 15, 15)
             } else {
-                (255, 255, 255) // Crisp white text for Dark Taskbar
+                (255, 255, 255)
             }
         }
         ColorMode::White => (255, 255, 255),
@@ -568,6 +618,27 @@ fn format_speed_compact(bps: u64) -> String {
     } else if b < GB {
         let v = b / MB;
         if v >= 100.0 {
+            format!("{:.0}M", v)
+        } else {
+            format!("{:.1}M", v)
+        }
+    } else {
+        format!("{:.1}G", b / GB)
+    }
+}
+
+fn format_speed_numbers_only(bps: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = 1024.0 * 1024.0;
+    const GB: f64 = 1024.0 * 1024.0 * 1024.0;
+    let b = bps as f64;
+    if b < KB {
+        format!("{bps}")
+    } else if b < MB {
+        format!("{:.0}K", b / KB)
+    } else if b < GB {
+        let v = b / MB;
+        if v >= 10.0 {
             format!("{:.0}M", v)
         } else {
             format!("{:.1}M", v)
@@ -610,7 +681,7 @@ fn format_bytes(bytes: u64) -> String {
 }
 
 // ============================================================================
-// Dynamic GDI Tray Icon Renderer (True Alpha Antialiased Text)
+// 1. Dynamic 32x32 GDI Tray Icon Renderer (Maximized Size & ClearType Sharpness)
 // ============================================================================
 
 fn render_tray_icon(
@@ -621,24 +692,33 @@ fn render_tray_icon(
     font_size: FontSizePreset,
     rgb: (u8, u8, u8),
 ) -> Icon {
-    const SIZE: i32 = 48; // Crisp 48x48 physical pixels (scales cleanly at 100%-300% DPI)
+    const SIZE: i32 = 32;
 
     let (line1, line2) = if !enabled {
         ("NET".to_string(), "OFF".to_string())
     } else {
-        (
-            format!("↓{}", format_speed_compact(down_bps)),
-            format!("↑{}", format_speed_compact(up_bps)),
-        )
+        match layout {
+            TrayLayout::ExtraLargeNumbersOnly => (
+                format_speed_numbers_only(down_bps),
+                format_speed_numbers_only(up_bps),
+            ),
+            _ => (
+                format!("↓{}", format_speed_compact(down_bps)),
+                format!("↑{}", format_speed_compact(up_bps)),
+            ),
+        }
     };
 
     let font_px = match (layout, font_size) {
-        (TrayLayout::Stacked, FontSizePreset::Small) => 17,
-        (TrayLayout::Stacked, FontSizePreset::Medium) => 20,
-        (TrayLayout::Stacked, FontSizePreset::Large) => 23,
-        (TrayLayout::SideBySide, FontSizePreset::Small) => 12,
-        (TrayLayout::SideBySide, FontSizePreset::Medium) => 14,
-        (TrayLayout::SideBySide, FontSizePreset::Large) => 16,
+        (TrayLayout::ExtraLargeNumbersOnly, FontSizePreset::Small) => 17,
+        (TrayLayout::ExtraLargeNumbersOnly, FontSizePreset::Medium) => 19,
+        (TrayLayout::ExtraLargeNumbersOnly, FontSizePreset::Large) => 22,
+        (TrayLayout::Stacked, FontSizePreset::Small) => 13,
+        (TrayLayout::Stacked, FontSizePreset::Medium) => 15,
+        (TrayLayout::Stacked, FontSizePreset::Large) => 17,
+        (TrayLayout::SideBySide, FontSizePreset::Small) => 9,
+        (TrayLayout::SideBySide, FontSizePreset::Medium) => 11,
+        (TrayLayout::SideBySide, FontSizePreset::Large) => 12,
     };
 
     let mut rgba = vec![0u8; (SIZE * SIZE * 4) as usize];
@@ -649,7 +729,7 @@ fn render_tray_icon(
             bmiHeader: BITMAPINFOHEADER {
                 biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
                 biWidth: SIZE,
-                biHeight: -SIZE, // Top-down DIB
+                biHeight: -SIZE,
                 biPlanes: 1,
                 biBitCount: 32,
                 biCompression: BI_RGB.0,
@@ -662,7 +742,6 @@ fn render_tray_icon(
         if let Ok(hbmp) = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &mut bits_ptr, None, 0) {
             let old_bmp = SelectObject(hdc, hbmp);
 
-            // Clear to pure black (0x00000000)
             let bg_brush = CreateSolidBrush(COLORREF(0));
             let full_rect = RECT {
                 left: 0,
@@ -678,36 +757,35 @@ fn render_tray_icon(
                 0,
                 0,
                 0,
-                FW_BOLD.0 as i32,
+                FW_EXTRABOLD.0 as i32,
                 0,
                 0,
                 0,
                 DEFAULT_CHARSET.0 as u32,
                 OUT_TT_PRECIS.0 as u32,
                 CLIP_DEFAULT_PRECIS.0 as u32,
-                ANTIALIASED_QUALITY.0 as u32,
+                CLEARTYPE_QUALITY.0 as u32,
                 (DEFAULT_PITCH.0 | FF_SWISS.0) as u32,
                 w!("Segoe UI"),
             );
             let old_font = SelectObject(hdc, font);
 
-            // Draw white text on black background to extract antialiased alpha coverage
             SetBkMode(hdc, TRANSPARENT);
             SetTextColor(hdc, COLORREF(0x00FF_FFFF));
 
             match layout {
-                TrayLayout::Stacked => {
+                TrayLayout::Stacked | TrayLayout::ExtraLargeNumbersOnly => {
                     let mut r1 = RECT {
-                        left: 0,
-                        top: 1,
-                        right: SIZE,
+                        left: -1,
+                        top: -2,
+                        right: SIZE + 1,
                         bottom: SIZE / 2 + 2,
                     };
                     let mut r2 = RECT {
-                        left: 0,
+                        left: -1,
                         top: SIZE / 2 - 2,
-                        right: SIZE,
-                        bottom: SIZE - 1,
+                        right: SIZE + 1,
+                        bottom: SIZE + 2,
                     };
                     let mut w1 = to_wide(&line1);
                     let mut w2 = to_wide(&line2);
@@ -771,6 +849,247 @@ fn render_tray_icon(
 }
 
 // ============================================================================
+// 2. Floating Click-Through Taskbar Overlay Widget (Next to Clock)
+// ============================================================================
+
+fn create_overlay_window() -> HWND {
+    unsafe {
+        let hmodule = GetModuleHandleW(None).unwrap_or_default();
+        let hinstance = HINSTANCE(hmodule.0);
+        let class_name = w!("NetPulseOverlayClass");
+
+        let wc = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            lpfnWndProc: Some(overlay_wnd_proc),
+            hInstance: hinstance,
+            lpszClassName: class_name,
+            ..Default::default()
+        };
+        RegisterClassExW(&wc);
+
+        CreateWindowExW(
+            WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+            class_name,
+            w!("NetPulseOverlay"),
+            WS_POPUP,
+            0,
+            0,
+            OVERLAY_W,
+            OVERLAY_H,
+            None,
+            None,
+            hinstance,
+            None,
+        )
+        .expect("Failed to create overlay window")
+    }
+}
+
+unsafe extern "system" fn overlay_wnd_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    DefWindowProcW(hwnd, msg, wparam, lparam)
+}
+
+fn find_taskbar_overlay_position() -> (i32, i32) {
+    unsafe {
+        if let Ok(tray_hwnd) = FindWindowW(w!("Shell_TrayWnd"), None) {
+            let mut tray_rect = RECT::default();
+            if GetWindowRect(tray_hwnd, &mut tray_rect).is_ok() {
+                let tray_h = tray_rect.bottom - tray_rect.top;
+                let y = tray_rect.top + (tray_h - OVERLAY_H) / 2;
+
+                // Position immediately to the left of TrayNotifyWnd (system tray & clock)
+                if let Ok(notify_hwnd) =
+                    FindWindowExW(tray_hwnd, None, w!("TrayNotifyWnd"), None)
+                {
+                    let mut notify_rect = RECT::default();
+                    if GetWindowRect(notify_hwnd, &mut notify_rect).is_ok() {
+                        return (notify_rect.left - OVERLAY_W - 6, y);
+                    }
+                }
+                return (tray_rect.right - OVERLAY_W - 220, y);
+            }
+        }
+    }
+    (1600, 1032)
+}
+
+fn update_overlay_window(
+    hwnd: HWND,
+    show: bool,
+    enabled: bool,
+    down_bps: u64,
+    up_bps: u64,
+    rgb: (u8, u8, u8),
+) {
+    unsafe {
+        if !show {
+            let _ = ShowWindow(hwnd, SW_HIDE);
+            return;
+        }
+
+        let (x, y) = find_taskbar_overlay_position();
+        let _ = SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            x,
+            y,
+            OVERLAY_W,
+            OVERLAY_H,
+            SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        );
+
+        let (line1, line2) = if !enabled {
+            ("↓ Paused".to_string(), "↑ Paused".to_string())
+        } else {
+            (
+                format!("↓ {}/s", format_speed_long(down_bps)),
+                format!("↑ {}/s", format_speed_long(up_bps)),
+            )
+        };
+
+        let screen_dc = GetDC(None);
+        let mem_dc = CreateCompatibleDC(screen_dc);
+
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: OVERLAY_W,
+                biHeight: -OVERLAY_H,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let mut bits_ptr: *mut c_void = std::ptr::null_mut();
+        if let Ok(hbmp) = CreateDIBSection(mem_dc, &bmi, DIB_RGB_COLORS, &mut bits_ptr, None, 0) {
+            let old_bmp = SelectObject(mem_dc, hbmp);
+
+            let bg_brush = CreateSolidBrush(COLORREF(0));
+            let full_rect = RECT {
+                left: 0,
+                top: 0,
+                right: OVERLAY_W,
+                bottom: OVERLAY_H,
+            };
+            FillRect(mem_dc, &full_rect, bg_brush);
+            let _ = DeleteObject(bg_brush);
+
+            // Windows 11 taskbar clock uses ~12pt Segoe UI (-16px height)
+            let font = CreateFontW(
+                -16,
+                0,
+                0,
+                0,
+                FW_BOLD.0 as i32,
+                0,
+                0,
+                0,
+                DEFAULT_CHARSET.0 as u32,
+                OUT_TT_PRECIS.0 as u32,
+                CLIP_DEFAULT_PRECIS.0 as u32,
+                CLEARTYPE_QUALITY.0 as u32,
+                (DEFAULT_PITCH.0 | FF_SWISS.0) as u32,
+                w!("Segoe UI"),
+            );
+            let old_font = SelectObject(mem_dc, font);
+
+            SetBkMode(mem_dc, TRANSPARENT);
+            SetTextColor(mem_dc, COLORREF(0x00FF_FFFF));
+
+            let mut r1 = RECT {
+                left: 0,
+                top: 2,
+                right: OVERLAY_W - 4,
+                bottom: OVERLAY_H / 2 + 1,
+            };
+            let mut r2 = RECT {
+                left: 0,
+                top: OVERLAY_H / 2 - 1,
+                right: OVERLAY_W - 4,
+                bottom: OVERLAY_H - 2,
+            };
+
+            let mut w1 = to_wide(&line1);
+            let mut w2 = to_wide(&line2);
+            let len1 = w1.len() - 1;
+            let len2 = w2.len() - 1;
+
+            DrawTextW(
+                mem_dc,
+                &mut w1[..len1],
+                &mut r1,
+                DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+            );
+            DrawTextW(
+                mem_dc,
+                &mut w2[..len2],
+                &mut r2,
+                DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+            );
+
+            let _ = GdiFlush();
+
+            // Convert white-on-black coverage into premultiplied BGRA for UpdateLayeredWindow
+            if !bits_ptr.is_null() {
+                let pixels = std::slice::from_raw_parts_mut(
+                    bits_ptr as *mut u8,
+                    (OVERLAY_W * OVERLAY_H * 4) as usize,
+                );
+                for px in pixels.chunks_exact_mut(4) {
+                    let cov = px[0].max(px[1]).max(px[2]);
+                    let a = cov as u16;
+                    px[0] = ((rgb.2 as u16 * a) / 255) as u8; // B
+                    px[1] = ((rgb.1 as u16 * a) / 255) as u8; // G
+                    px[2] = ((rgb.0 as u16 * a) / 255) as u8; // R
+                    px[3] = cov; // A
+                }
+            }
+
+            let pt_dst = POINT { x, y };
+            let pt_src = POINT { x: 0, y: 0 };
+            let sz = SIZE {
+                cx: OVERLAY_W,
+                cy: OVERLAY_H,
+            };
+            let blend = BLENDFUNCTION {
+                BlendOp: AC_SRC_OVER as u8,
+                BlendFlags: 0,
+                SourceConstantAlpha: 255,
+                AlphaFormat: AC_SRC_ALPHA as u8,
+            };
+
+            let _ = UpdateLayeredWindow(
+                hwnd,
+                HDC::default(),
+                Some(&pt_dst),
+                Some(&sz),
+                mem_dc,
+                Some(&pt_src),
+                COLORREF(0),
+                Some(&blend),
+                ULW_ALPHA,
+            );
+
+            SelectObject(mem_dc, old_font);
+            let _ = DeleteObject(font);
+            SelectObject(mem_dc, old_bmp);
+            let _ = DeleteObject(hbmp);
+        }
+
+        let _ = DeleteDC(mem_dc);
+        let _ = ReleaseDC(None, screen_dc);
+    }
+}
+
+// ============================================================================
 // Windows Startup Registry (HKCU\Software\Microsoft\Windows\CurrentVersion\Run)
 // ============================================================================
 
@@ -826,8 +1145,8 @@ fn create_settings_window(
             WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
-            400,
-            390,
+            410,
+            425,
             None,
             None,
             hinstance,
@@ -835,7 +1154,6 @@ fn create_settings_window(
         )
         .expect("Failed to create settings window");
 
-        // Enable Windows 11 Dark Title Bar if system is in Dark Mode
         let dark: u32 = if is_system_light_taskbar() { 0 } else { 1 };
         let _ = DwmSetWindowAttribute(
             hwnd,
@@ -856,7 +1174,7 @@ fn create_settings_window(
             DEFAULT_CHARSET.0 as u32,
             OUT_TT_PRECIS.0 as u32,
             CLIP_DEFAULT_PRECIS.0 as u32,
-            ANTIALIASED_QUALITY.0 as u32,
+            CLEARTYPE_QUALITY.0 as u32,
             (DEFAULT_PITCH.0 | FF_SWISS.0) as u32,
             w!("Segoe UI"),
         );
@@ -900,7 +1218,7 @@ fn create_settings_window(
             SS_LEFT_STYLE,
             20,
             18,
-            345,
+            355,
             22,
             0,
         );
@@ -910,7 +1228,7 @@ fn create_settings_window(
             SS_LEFT_STYLE,
             20,
             44,
-            345,
+            355,
             22,
             0,
         );
@@ -920,7 +1238,7 @@ fn create_settings_window(
             SS_LEFT_STYLE,
             20,
             72,
-            345,
+            355,
             22,
             0,
         );
@@ -930,7 +1248,7 @@ fn create_settings_window(
             SS_LEFT_STYLE,
             20,
             98,
-            345,
+            355,
             22,
             0,
         );
@@ -941,18 +1259,18 @@ fn create_settings_window(
             BS_AUTOCHECKBOX as u32 | WS_TABSTOP.0,
             20,
             136,
-            300,
+            320,
             24,
             ID_CHK_ENABLED,
         );
 
         let _ = make_ctrl(
             w!("STATIC"),
-            w!("Taskbar Layout:"),
+            w!("Tray Icon Layout:"),
             SS_LEFT_STYLE,
             20,
             174,
-            120,
+            125,
             22,
             0,
         );
@@ -960,13 +1278,17 @@ fn create_settings_window(
             w!("COMBOBOX"),
             w!(""),
             CBS_DROPDOWNLIST as u32 | WS_TABSTOP.0,
-            150,
+            155,
             170,
-            215,
-            120,
+            220,
+            140,
             ID_CMB_LAYOUT,
         );
-        for opt in [w!("Stacked (↓ / ↑)"), w!("Side-by-Side (↓ ↑)")] {
+        for opt in [
+            w!("Stacked (↓ / ↑)"),
+            w!("Side-by-Side (↓ ↑)"),
+            w!("Extra Large (Numbers Only)"),
+        ] {
             SendMessageW(
                 cmb_layout,
                 CB_ADDSTRING,
@@ -981,7 +1303,7 @@ fn create_settings_window(
             SS_LEFT_STYLE,
             20,
             208,
-            120,
+            125,
             22,
             0,
         );
@@ -989,9 +1311,9 @@ fn create_settings_window(
             w!("COMBOBOX"),
             w!(""),
             CBS_DROPDOWNLIST as u32 | WS_TABSTOP.0,
-            150,
+            155,
             204,
-            215,
+            220,
             120,
             ID_CMB_FONTSIZE,
         );
@@ -1010,7 +1332,7 @@ fn create_settings_window(
             SS_LEFT_STYLE,
             20,
             242,
-            120,
+            125,
             22,
             0,
         );
@@ -1018,9 +1340,9 @@ fn create_settings_window(
             w!("COMBOBOX"),
             w!(""),
             CBS_DROPDOWNLIST as u32 | WS_TABSTOP.0,
-            150,
+            155,
             238,
-            215,
+            220,
             160,
             ID_CMB_COLOR,
         );
@@ -1046,9 +1368,20 @@ fn create_settings_window(
             BS_AUTOCHECKBOX as u32 | WS_TABSTOP.0,
             20,
             278,
-            300,
+            320,
             24,
             ID_CHK_AUTOSTART,
+        );
+
+        let chk_overlay = make_ctrl(
+            w!("BUTTON"),
+            w!("Show Large Taskbar Overlay (Next to Clock)"),
+            BS_AUTOCHECKBOX as u32 | WS_TABSTOP.0,
+            20,
+            308,
+            355,
+            24,
+            ID_CHK_OVERLAY,
         );
 
         let _ = make_ctrl(
@@ -1056,8 +1389,8 @@ fn create_settings_window(
             w!("Reset Session"),
             BS_PUSHBUTTON as u32 | WS_TABSTOP.0,
             20,
-            314,
-            130,
+            346,
+            135,
             30,
             ID_BTN_RESET,
         );
@@ -1065,9 +1398,9 @@ fn create_settings_window(
             w!("BUTTON"),
             w!("Hide to Tray"),
             BS_PUSHBUTTON as u32 | WS_TABSTOP.0,
-            235,
-            314,
-            130,
+            240,
+            346,
+            135,
             30,
             ID_BTN_HIDE,
         );
@@ -1077,6 +1410,7 @@ fn create_settings_window(
             proxy,
             chk_enabled,
             chk_autostart,
+            chk_overlay,
             cmb_layout,
             cmb_fontsize,
             cmb_color,
@@ -1092,6 +1426,7 @@ fn create_settings_window(
             lbl_adapter,
             chk_enabled,
             chk_autostart,
+            chk_overlay,
             cmb_layout,
             cmb_fontsize,
             cmb_color,
@@ -1108,7 +1443,6 @@ unsafe extern "system" fn settings_wnd_proc(
 ) -> LRESULT {
     match msg {
         WM_CLOSE => {
-            // Minimize to background tray instead of exiting
             let _ = ShowWindow(hwnd, SW_HIDE);
             LRESULT(0)
         }
@@ -1137,6 +1471,14 @@ unsafe extern "system" fn settings_wnd_proc(
                         data.shared.lock().unwrap().config.monitor_enabled = checked;
                         let _ = data.proxy.send_event(UserEvent::SettingsChanged);
                     }
+                    ID_CHK_OVERLAY => {
+                        let checked =
+                            SendMessageW(data.chk_overlay, BM_GETCHECK, WPARAM(0), LPARAM(0)).0
+                                as usize
+                                == BST_CHECKED_VAL;
+                        data.shared.lock().unwrap().config.show_overlay = checked;
+                        let _ = data.proxy.send_event(UserEvent::SettingsChanged);
+                    }
                     ID_CHK_AUTOSTART => {
                         let checked =
                             SendMessageW(data.chk_autostart, BM_GETCHECK, WPARAM(0), LPARAM(0)).0
@@ -1150,10 +1492,10 @@ unsafe extern "system" fn settings_wnd_proc(
                     ID_CMB_LAYOUT if notif == 1 => {
                         let idx =
                             SendMessageW(data.cmb_layout, CB_GETCURSEL, WPARAM(0), LPARAM(0)).0;
-                        data.shared.lock().unwrap().config.layout = if idx == 1 {
-                            TrayLayout::SideBySide
-                        } else {
-                            TrayLayout::Stacked
+                        data.shared.lock().unwrap().config.layout = match idx {
+                            1 => TrayLayout::SideBySide,
+                            2 => TrayLayout::ExtraLargeNumbersOnly,
+                            _ => TrayLayout::Stacked,
                         };
                         let _ = data.proxy.send_event(UserEvent::SettingsChanged);
                     }
